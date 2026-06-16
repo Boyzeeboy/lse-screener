@@ -33,9 +33,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const WATCHLIST = [
-  'AZN.L','SHEL.L','HSBA.L','ULVR.L','BP.L','GSK.L','RIO.L','BATS.L',
-  'DGE.L','LSEG.L','REL.L','NG.L','RR.L','BARC.L','LLOY.L','TSCO.L',
-  'VOD.L','GLEN.L','PRU.L','AAL.L',
+  // Trimmed to 5 with the .LON suffix Alpha Vantage uses for LSE, to stay inside
+  // the free 25-calls/day cap while you test. Expand once on a paid/other plan.
+  'SHEL.LON','AZN.LON','HSBA.LON','ULVR.LON','TSCO.LON',
+  // Full set (re-enable later):
+  // 'BP.LON','GSK.LON','RIO.LON','BATS.LON','DGE.LON','LSEG.LON','REL.LON',
+  // 'NG.LON','RR.LON','BARC.LON','LLOY.LON','VOD.LON','GLEN.LON','PRU.LON','AAL.LON',
 ];
 
 const SNAPSHOT_KEY  = 'snapshot:v1';
@@ -44,6 +47,12 @@ const RET_3M_DAYS   = 91;
 const VOL_WINDOW    = 252;   // trading days (~1yr) of daily returns
 const SERIES_KEEP   = 520;   // ~2yr of price points retained per ticker
 const FUND_TTL_DAYS = 30;    // refetch balance-sheet/earnings at most monthly
+// Free Alpha Vantage tier: uses TIME_SERIES_DAILY (raw close) + compact history,
+// the endpoints a free key can reach. This means PRICE return (dividends
+// excluded) and ~100 days of history, so 12-month return fills in only after the
+// daily cache accrues a year. Set false once you have a premium AV key (or have
+// adapted the fetchers to EODHD/Twelve Data) to restore adjusted TOTAL return.
+const USE_FREE_TIER = true;
 const EPS_YEARS     = 5;     // years of EPS used for the consistency score
 
 export default {
@@ -87,7 +96,7 @@ async function fetchOne(ticker, env){
   const latest   = series[series.length - 1] || null;
 
   return {
-    tkr:   ticker.replace('.L', ''),
+    tkr:   ticker.split('.')[0],
     price: latest ? Math.round(latest.close) : null,  // raw close = actual price
     r12:   totalReturn(series, RET_12M_DAYS),
     r3:    totalReturn(series, RET_3M_DAYS),
@@ -106,7 +115,8 @@ async function getSeries(ticker, env){
   const cachedRaw = await env.SCREENER.get(key);
   const cached = cachedRaw ? JSON.parse(cachedRaw) : null;
 
-  const size = (cached && cached.length > 150) ? 'compact' : 'full';
+  const size = USE_FREE_TIER ? 'compact'
+             : ((cached && cached.length > 150) ? 'compact' : 'full');
   const fresh = await fetchSeries(ticker, env.DATA_API_KEY, size);
 
   const byDate = new Map();
@@ -142,16 +152,17 @@ async function getQualityExtras(ticker, env){
 
 // ── Provider-specific fetches (Alpha Vantage) ────────────────────────────────
 async function fetchSeries(ticker, key, size){
+  const fn = USE_FREE_TIER ? 'TIME_SERIES_DAILY' : 'TIME_SERIES_DAILY_ADJUSTED';
   const url = 'https://www.alphavantage.co/query'
-    + `?function=TIME_SERIES_DAILY_ADJUSTED&symbol=${ticker}`
+    + `?function=${fn}&symbol=${ticker}`
     + `&outputsize=${size}&apikey=${key}`;
   const json = await fetch(url).then(r => r.json());
   const ts = json['Time Series (Daily)'];
   if (!ts) throw new Error(json.Note || json.Information || json['Error Message'] || 'no series');
   return Object.entries(ts).map(([date, o]) => {
     const raw = parseFloat(o['4. close']);
-    const adj = parseFloat(o['5. adjusted close']);
-    return { date, close: raw, adj: Number.isFinite(adj) ? adj : raw };  // fallback: raw
+    const adj = parseFloat(o['5. adjusted close']);                  // absent on the free endpoint
+    return { date, close: raw, adj: Number.isFinite(adj) ? adj : raw };  // → falls back to raw close
   }).sort((a, b) => a.date < b.date ? -1 : 1);
 }
 
