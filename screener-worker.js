@@ -71,7 +71,7 @@ export default {
 
   async fetch(request, env, ctx){
     const cors = {
-      'Access-Control-Allow-Origin': '*',           // tighten to your Pages domain
+      'Access-Control-Allow-Origin': 'https://lse-screener.pages.dev',  // dashboard origin
       'Content-Type': 'application/json',
       'Cache-Control': 'public, max-age=900',
     };
