@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LSE Share Screener</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#14201f; --muted:#5f6b69; --faint:#8b9794;
+    --page:#eef2f1; --surface:#ffffff; --hair:#e0e6e4;
+    --teal:#007582; --teal-soft:#e3f0f1;
+    --pos:#0f7355; --neg:#b1492f; --amber:#a86a16;
+    --bar-track:#eaeeed;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    font-family:'DM Sans',system-ui,sans-serif;
+    background:var(--page); color:var(--ink);
+    line-height:1.5; font-variant-numeric:tabular-nums lining-nums;
+    padding:clamp(16px,4vw,40px);
+  }
+  .wrap{max-width:1180px;margin:0 auto}
+
+  /* Masthead */
+  header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:6px}
+  .title{font-family:'Newsreader',Georgia,serif;font-weight:500;font-size:clamp(28px,5vw,42px);letter-spacing:-0.01em;line-height:1.05}
+  .title .mark{color:var(--teal)}
+  .sub{color:var(--muted);font-size:14px;margin-top:6px;max-width:52ch}
+
+  /* Status pill */
+  .status{font-family:'DM Mono',monospace;font-size:11px;letter-spacing:0.04em;color:var(--faint);text-align:right;white-space:nowrap;display:flex;align-items:center;gap:7px;justify-content:flex-end}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}
+  .status.demo .dot{background:var(--amber)} .status.demo{color:var(--amber)}
+  .status.live .dot{background:var(--teal);box-shadow:0 0 0 0 rgba(0,117,130,.5);animation:pulse 2s infinite} .status.live{color:var(--teal)}
+  .status.offline .dot{background:var(--neg)} .status.offline{color:var(--neg)}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(0,117,130,.45)}70%{box-shadow:0 0 0 6px rgba(0,117,130,0)}100%{box-shadow:0 0 0 0 rgba(0,117,130,0)}}
+
+  .notice{
+    margin:18px 0 22px;padding:10px 14px;border:1px solid var(--hair);
+    border-left:3px solid var(--teal);border-radius:8px;background:var(--surface);
+    font-size:12.5px;color:var(--muted);
+  }
+  .notice b{color:var(--ink);font-weight:600}
+  .notice.warn{border-left-color:var(--amber)}
+  .notice.err{border-left-color:var(--neg)}
+
+  /* Controls */
+  .controls{
+    background:var(--surface);border:1px solid var(--hair);border-radius:14px;
+    padding:20px clamp(16px,3vw,26px);margin-bottom:22px;
+  }
+  .controls-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}
+  .controls-head .eyebrow{font-family:'DM Mono',monospace;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--faint)}
+  .ctl-actions{display:flex;align-items:center;gap:14px}
+  .preset{background:none;border:1px solid var(--teal);color:var(--teal);font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;padding:5px 12px;border-radius:999px;line-height:1}
+  .preset:hover{background:var(--teal-soft)}
+  .preset:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
+  .reset{background:none;border:none;color:var(--muted);font:inherit;font-size:13px;font-weight:500;cursor:pointer;padding:4px 2px}
+  .reset:hover{text-decoration:underline;color:var(--teal)}
+  .reset:focus-visible{outline:2px solid var(--teal);outline-offset:3px;border-radius:4px}
+
+  .sliders{display:grid;grid-template-columns:repeat(4,1fr);gap:clamp(16px,3vw,30px)}
+  @media(max-width:720px){.sliders{grid-template-columns:repeat(2,1fr);gap:22px 26px}}
+  @media(max-width:420px){.sliders{grid-template-columns:1fr}}
+  .factor label{display:flex;align-items:baseline;justify-content:space-between;font-size:14px;font-weight:600;margin-bottom:4px}
+  .factor .val{font-family:'DM Mono',monospace;font-weight:500;color:var(--teal);font-size:13px}
+  .factor .hint{font-size:11.5px;color:var(--faint);margin-bottom:11px;min-height:2.4em}
+  input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:4px;background:var(--bar-track);outline:none;cursor:pointer}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:18px;height:18px;border-radius:50%;background:var(--teal);border:3px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.18);cursor:pointer}
+  input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--teal);border:3px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.18);cursor:pointer}
+  input[type=range]:focus-visible{outline:2px solid var(--teal);outline-offset:4px}
+  input[type=range]:disabled{opacity:.4;cursor:not-allowed}
+
+  /* Table */
+  .tablecard{background:var(--surface);border:1px solid var(--hair);border-radius:14px;overflow:hidden}
+  .tablescroll{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;min-width:980px}
+  thead th{
+    font-family:'DM Mono',monospace;font-weight:500;font-size:10.5px;letter-spacing:0.07em;text-transform:uppercase;
+    color:var(--muted);text-align:right;padding:14px 14px 12px;border-bottom:1px solid var(--hair);
+    cursor:pointer;user-select:none;white-space:nowrap;position:relative;background:var(--surface);
+  }
+  thead th:first-child,thead th:nth-child(2){text-align:left}
+  thead th:hover{color:var(--ink)}
+  thead th:focus-visible{outline:2px solid var(--teal);outline-offset:-2px}
+  th .arrow{color:var(--teal);font-size:9px;margin-left:3px}
+  tbody td{padding:13px 14px;border-bottom:1px solid #f0f3f2;text-align:right;font-family:'DM Mono',monospace;font-weight:400;white-space:nowrap}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:#f7faf9}
+  td.tkr{text-align:left;font-weight:500;color:var(--ink)}
+  td.name{text-align:left;font-family:'DM Sans',sans-serif;color:var(--muted);max-width:180px;overflow:hidden;text-overflow:ellipsis}
+  .tier{display:inline-block;font-family:'DM Mono',monospace;font-size:9px;letter-spacing:.04em;color:var(--faint);border:1px solid var(--hair);border-radius:4px;padding:1px 4px;margin-left:7px;vertical-align:middle}
+  .pos{color:var(--pos)}.neg{color:var(--neg)}
+  td .na{color:var(--faint)}
+  .sig{display:inline-block;font-family:'DM Sans',sans-serif;font-size:11px;font-weight:600;padding:3px 10px;border-radius:999px;cursor:help;white-space:nowrap}
+  .sig-cand{background:var(--teal);color:#fff}
+  .sig-watch{background:none;border:1px solid var(--amber);color:var(--amber)}
+  .rank{color:var(--faint);font-size:12px;width:26px}
+
+  /* Composite cell */
+  td.score{font-weight:500}
+  .scorewrap{display:flex;align-items:center;justify-content:flex-end;gap:9px}
+  .scoreval{color:var(--teal);font-weight:500;min-width:34px;text-align:right}
+  .scorebar{width:46px;height:6px;border-radius:3px;background:var(--bar-track);overflow:hidden;flex:none}
+  .scorebar i{display:block;height:100%;background:var(--teal);border-radius:3px}
+
+  /* Loading skeleton */
+  .skel{display:block;height:11px;border-radius:4px;background:linear-gradient(90deg,#eef2f1 25%,#e2e8e6 37%,#eef2f1 63%);background-size:400% 100%;animation:shimmer 1.3s ease infinite;margin-left:auto;width:60%}
+  td.tkr .skel,td.name .skel{margin-left:0}
+  @keyframes shimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
+
+  /* Full-width state row */
+  .staterow td{text-align:center;padding:46px 20px;color:var(--muted);font-family:'DM Sans',sans-serif}
+  .staterow .big{font-size:15px;font-weight:600;color:var(--ink);margin-bottom:5px}
+  .staterow .retry{margin-top:14px;background:var(--teal);color:#fff;border:none;border-radius:8px;padding:9px 16px;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+  .staterow .retry:hover{background:#005f6a}
+
+  @media(prefers-reduced-motion:reduce){.skel,.status.live .dot{animation:none}}
+
+  footer{margin-top:18px;font-size:11.5px;color:var(--faint);line-height:1.6}
+  footer code{font-family:'DM Mono',monospace;background:#e7ecea;padding:1px 5px;border-radius:4px;color:var(--muted);font-size:11px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <div class="title">London <span class="mark">Market</span> Screener</div>
+      <div class="sub">Rank FTSE shares by a weighted blend of momentum, value, quality and stability. Drag the weights to match what you care about — the table re-ranks live.</div>
+    </div>
+    <div class="status" id="status"><span class="dot"></span><span id="status-text">Starting…</span></div>
+  </header>
+
+  <div class="notice" id="notice">
+    <b>Illustrative mock data.</b> Set <code>WORKER_URL</code> in the script to your deployed Cloudflare Worker to pull live end-of-day figures. Nothing here is financial advice.
+  </div>
+
+  <section class="controls" aria-label="Factor weights">
+    <div class="controls-head">
+      <span class="eyebrow">Factor weights</span>
+      <div class="ctl-actions">
+        <button class="preset" id="preset-buffett" title="Quality 45 · Value 35 · Stability 20 · Momentum 0">Buffett preset</button>
+        <button class="reset" id="reset">Reset to balanced</button>
+      </div>
+    </div>
+    <div class="sliders" id="sliders"></div>
+  </section>
+
+  <div class="tablecard">
+    <div class="tablescroll">
+      <table>
+        <thead><tr id="head"></tr></thead>
+        <tbody id="body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <footer>
+    <p><b>How the score works:</b> each share is percentile-ranked 0–100 against the others on every metric (P/E, volatility and D/E inverted, since lower is better). The four factor scores are then blended using your weights — Quality now combines ROE, gearing (D/E) and earnings consistency (<b>Cons</b>, 0–100: reliably profitable and smooth). Missing metrics (shown as &mdash;) are skipped, so a factor scores on whatever data it has. A score of 100 = best-in-list on your priorities — relative to this set only.</p>
+    <p><b>The Signal column is a research shortlist, not advice — and not a prediction of returns.</b> A name is flagged <span class="sig sig-cand">Candidate</span> only if it clears every gate: composite &ge; 70, earnings consistency &ge; 0.5, P/E &le; 22, and 3-month return &ge; 0 — and isn't tripping the dividend-trap guard (yield &gt; 7% while the 12-month return is negative). <span class="sig sig-watch">Watch</span> = top-ranked but failing a gate or carrying that caution. Hover a badge for the per-check breakdown. It only narrows where to look; it doesn't replace your own judgement on the business and valuation, and it's only as reliable as the data and thresholds behind it (which haven't been backtested). Edit the <code>SIGNAL</code> values in the script to tune.</p>
+  </footer>
+
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+//  CONFIG — set this to your deployed Worker to go live.
+//  Leave empty ('') to run on the bundled demo data.
+//  e.g. const WORKER_URL = 'https://lse-screener.<you>.workers.dev';
+// ═══════════════════════════════════════════════════════════════════════════
+const WORKER_URL = '';
+
+// Company names + index tier never change day-to-day, so they live here rather
+// than in every API response. Merged onto whatever the Worker returns.
+const META = {
+  AZN:['AstraZeneca','F100'], SHEL:['Shell','F100'], HSBA:['HSBC Holdings','F100'],
+  ULVR:['Unilever','F100'], BP:['BP','F100'], GSK:['GSK','F100'], RIO:['Rio Tinto','F100'],
+  BATS:['Brit. Amer. Tobacco','F100'], DGE:['Diageo','F100'], LSEG:['London Stock Exch.','F100'],
+  REL:['RELX','F100'], NG:['National Grid','F100'], RR:['Rolls-Royce','F100'],
+  BARC:['Barclays','F100'], LLOY:['Lloyds Banking','F100'], TSCO:['Tesco','F100'],
+  VOD:['Vodafone','F100'], GLEN:['Glencore','F100'], PRU:['Prudential','F100'],
+  AAL:['Anglo American','F100'],
+};
+
+// Demo data — used when WORKER_URL is empty or a live fetch fails.
+const MOCK = [
+  {tkr:'AZN', price:11240, r12:18.4, r3:6.1, pe:18.2, yield:2.1, roe:24.5, vol:19, de:0.62, econ:0.86 },
+  {tkr:'SHEL',price:2710,  r12:9.2,  r3:-3.4,pe:9.1,  yield:3.9, roe:14.2, vol:24, de:0.45, econ:0.52 },
+  {tkr:'HSBA',price:712,   r12:21.7, r3:4.8, pe:7.8,  yield:6.3, roe:12.1, vol:22, de:1.10, econ:0.66 },
+  {tkr:'ULVR',price:4680,  r12:11.0, r3:1.2, pe:17.5, yield:3.3, roe:28.9, vol:15, de:0.95, econ:0.90 },
+  {tkr:'BP',  price:398,   r12:-12.6,r3:-7.1,pe:11.4, yield:5.7, roe:8.4,  vol:27, de:0.78, econ:0.40 },
+  {tkr:'GSK', price:1402,  r12:-4.1, r3:2.9, pe:13.0, yield:4.1, roe:18.0, vol:20, de:0.85, econ:0.62 },
+  {tkr:'RIO', price:4815,  r12:-8.3, r3:5.5, pe:8.6,  yield:6.8, roe:19.7, vol:26, de:0.30, econ:0.55 },
+  {tkr:'BATS',price:3120,  r12:24.9, r3:8.2, pe:8.0,  yield:7.9, roe:11.5, vol:18, de:0.95, econ:0.82 },
+  {tkr:'DGE', price:2390,  r12:-19.2,r3:-5.6,pe:16.8, yield:3.6, roe:31.2, vol:21, de:1.05, econ:0.78 },
+  {tkr:'LSEG',price:11250, r12:15.1, r3:3.0, pe:28.4, yield:1.2, roe:9.8,  vol:17, de:0.55, econ:0.80 },
+  {tkr:'REL', price:3940,  r12:22.3, r3:5.9, pe:31.0, yield:1.6, roe:46.0, vol:16, de:0.70, econ:0.93 },
+  {tkr:'NG',  price:1058,  r12:6.7,  r3:1.8, pe:14.6, yield:5.1, roe:9.2,  vol:14, de:1.35, econ:0.88 },
+  {tkr:'RR',  price:602,   r12:71.5, r3:14.2,pe:30.5, yield:0.9, roe:38.5, vol:34, de:1.20, econ:0.42 },
+  {tkr:'BARC',price:312,   r12:48.0, r3:9.3, pe:6.9,  yield:3.2, roe:10.4, vol:29, de:1.30, econ:0.58 },
+  {tkr:'LLOY',price:62,    r12:39.4, r3:7.7, pe:7.4,  yield:4.6, roe:11.0, vol:28, de:1.15, econ:0.62 },
+  {tkr:'TSCO',price:368,   r12:13.8, r3:2.4, pe:13.2, yield:3.5, roe:13.9, vol:16, de:0.80, econ:0.74 },
+  {tkr:'VOD', price:71,    r12:-9.8, r3:-2.1,pe:10.1, yield:7.4, roe:4.1,  vol:23, de:0.92, econ:0.38 },
+  {tkr:'GLEN',price:368,   r12:-14.0,r3:1.0, pe:12.7, yield:5.5, roe:7.8,  vol:31, de:0.42, econ:0.48 },
+  {tkr:'PRU', price:740,   r12:-6.5, r3:3.6, pe:9.4,  yield:2.8, roe:13.3, vol:25, de:0.50, econ:0.60 },
+  {tkr:'AAL', price:2380,  r12:5.9,  r3:6.8, pe:15.5, yield:3.0, roe:6.6,  vol:30, de:0.38, econ:0.45 },
+];
+
+// ── Factor definitions (dir: +1 higher-better, -1 lower-better) ──────────────
+const FACTORS = [
+  {key:'momentum',label:'Momentum',hint:'12-month + 3-month total return. Rewards recent winners.',
+    metrics:[['r12',1],['r3',1]]},
+  {key:'value',label:'Value',hint:'Low P/E + high dividend yield. Rewards the cheap-looking.',
+    metrics:[['pe',-1],['yield',1]]},
+  {key:'quality',label:'Quality',hint:'ROE + low gearing + earnings consistency. Rewards durable, well-run businesses.',
+    metrics:[['roe',1],['de',-1],['econ',1]]},
+  {key:'stability',label:'Stability',hint:'Low volatility. Rewards a steadier, less bumpy ride.',
+    metrics:[['vol',-1]]},
+];
+
+const DEFAULT_W = {momentum:30, value:30, quality:25, stability:15};
+const BUFFETT_W = {momentum:0,  value:35, quality:45, stability:20}; // quality-led, contrarian
+let weights = {...DEFAULT_W};
+let sortKey = 'score', sortDir = -1;
+let STOCKS = [];
+let state = 'loading';   // loading | ready | empty | error
+
+// ── Data layer ───────────────────────────────────────────────────────────────
+function hydrate(rows){
+  // attach name + tier from META; ignore tickers we don't recognise
+  return rows.map(s => {
+    const meta = META[s.tkr] || [s.tkr, ''];
+    return {...s, name: meta[0], tier: meta[1]};
+  });
+}
+
+async function loadData(){
+  setStatus('loading');
+  state = 'loading'; renderBody();
+
+  if(!WORKER_URL){
+    STOCKS = hydrate(MOCK);
+    state = 'ready';
+    setStatus('demo');
+    update();
+    return;
+  }
+
+  try{
+    const res = await fetch(WORKER_URL, {headers:{'Accept':'application/json'}});
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const rows = Array.isArray(data) ? data : (data.stocks || []);
+    if(!rows.length) throw new Error('empty');
+
+    STOCKS = hydrate(rows);
+    state = 'ready';
+    setStatus('live', data.updated);
+    setNotice('live');
+    update();
+  }catch(err){
+    // fall back to demo so the tool stays usable, but say so plainly
+    STOCKS = hydrate(MOCK);
+    state = 'ready';
+    setStatus('offline');
+    setNotice('error', err.message);
+    update();
+  }
+}
+
+function setStatus(kind, updated){
+  const el = document.getElementById('status');
+  const txt = document.getElementById('status-text');
+  el.className = 'status ' + (kind==='live'?'live':kind==='offline'?'offline':kind==='demo'?'demo':'');
+  if(kind==='loading') txt.textContent = 'Loading feed…';
+  else if(kind==='demo') txt.textContent = 'DEMO DATA';
+  else if(kind==='offline') txt.textContent = 'FEED OFFLINE · DEMO';
+  else if(kind==='live'){
+    const t = updated ? new Date(updated) : null;
+    txt.textContent = 'LIVE · ' + (t ? t.toLocaleDateString('en-GB',{day:'2-digit',month:'short'}) + ' close' : 'updated');
+  }
+}
+
+function setNotice(kind, msg){
+  const n = document.getElementById('notice');
+  if(kind==='live'){
+    n.className='notice';
+    n.innerHTML='<b>Live end-of-day data.</b> Pulled from your Worker. Gearing (D/E) and consistency come from fundamentals refreshed monthly; any metric without enough data shows as &mdash;. Not financial advice.';
+  }else if(kind==='error'){
+    n.className='notice err';
+    n.innerHTML='<b>Couldn\u2019t reach the data feed</b> ('+msg+'). Showing demo data. Check the Worker is deployed and <code>WORKER_URL</code> is correct, then retry.';
+  }
+}
+
+// ── Null-safe percentile ranking ──────────────────────────────────────────────
+function pct(values, v, dir){
+  if(v==null || Number.isNaN(v)) return null;          // no data → no opinion
+  const clean = values.filter(x=>x!=null && !Number.isNaN(x));
+  if(clean.length < 2) return 0.5;
+  const arr = dir>0 ? clean : clean.map(x=>-x);
+  const t   = dir>0 ? v : -v;
+  let below=0; arr.forEach(x=>{ if(x<t) below++; });
+  return below/(clean.length-1);                        // 0..1
+}
+
+function computeScores(){
+  const cols={};
+  ['r12','r3','pe','yield','roe','vol','de','econ'].forEach(m=>cols[m]=STOCKS.map(s=>s[m]));
+  const wsum = Object.values(weights).reduce((a,b)=>a+b,0) || 1;
+
+  STOCKS.forEach(s=>{
+    let total=0;
+    FACTORS.forEach(f=>{
+      const ps = f.metrics.map(([m,dir])=>pct(cols[m], s[m], dir)).filter(p=>p!=null);
+      const p  = ps.length ? ps.reduce((a,b)=>a+b,0)/ps.length : 0.5;  // neutral if blank
+      s['_'+f.key] = Math.round(p*100);
+      total += (weights[f.key]/wsum) * p;
+    });
+    s.score = Math.round(total*100);
+    s.signal = evalSignal(s);
+  });
+}
+
+// ── Rules-based research flag (transparent, tunable — NOT advice) ─────────────
+const SIGNAL = { minScore:70, minEcon:0.5, maxPE:22, maxYield:7 };
+function evalSignal(s){
+  const rank     = s.score != null && s.score >= SIGNAL.minScore;
+  const quality  = s.econ  != null && s.econ  >= SIGNAL.minEcon;
+  const value    = s.pe    != null && s.pe    <= SIGNAL.maxPE;
+  const momentum = s.r3    != null && s.r3    >= 0;
+  const trap     = (s.yield != null && s.yield > SIGNAL.maxYield) && (s.r12 != null && s.r12 < 0);
+
+  const mark = (ok, known) => known ? (ok ? '\u2713' : '\u2717') : '?';
+  let reasons =
+    'Composite \u2265' + SIGNAL.minScore + ' ' + mark(rank, s.score!=null) + '  \u00b7  ' +
+    'Quality floor ' + mark(quality, s.econ!=null) + '  \u00b7  ' +
+    'P/E \u2264' + SIGNAL.maxPE + ' ' + mark(value, s.pe!=null) + '  \u00b7  ' +
+    '3m \u22650 ' + mark(momentum, s.r3!=null);
+  if (trap) reasons += '  \u00b7  \u26a0 high yield + falling price (possible dividend trap)';
+
+  const core = rank && quality && value && momentum;
+  let tier = 'none';
+  if (core && !trap) tier = 'candidate';
+  else if (rank) tier = 'watch';     // top-ranked but a gate fails or trap fires
+  return { tier, reasons };
+}
+
+// ── Cell formatters (all null-safe) ──────────────────────────────────────────
+const na = '<span class="na">&mdash;</span>';
+function ret(v){
+  if(v==null) return na;
+  const cls = v>=0?'pos':'neg', sign = v>=0?'+':'';
+  return '<span class="'+cls+'">'+sign+v.toFixed(1)+'%</span>';
+}
+const fix1 = (v,suf='')=> v==null ? na : v.toFixed(1)+suf;
+const fix2 = v=> v==null ? na : v.toFixed(2);
+const intg = v=> v==null ? na : Math.round(v).toLocaleString();
+
+const COLS = [
+  {key:'rank',  label:'#',     get:(s,i)=>'<span class="rank">'+(i+1)+'</span>', sort:false},
+  {key:'tkr',   label:'Ticker',cls:'tkr', get:s=>s.tkr+(s.tier?'<span class="tier">'+s.tier+'</span>':'')},
+  {key:'name',  label:'Company',cls:'name',get:s=>s.name||''},
+  {key:'price', label:'Price (p)', get:s=>intg(s.price)},
+  {key:'r12',   label:'12m',   get:s=>ret(s.r12)},
+  {key:'r3',    label:'3m',    get:s=>ret(s.r3)},
+  {key:'pe',    label:'P/E',   get:s=>fix1(s.pe)},
+  {key:'yield', label:'Yield', get:s=>fix1(s.yield,'%')},
+  {key:'roe',   label:'ROE',   get:s=>fix1(s.roe,'%')},
+  {key:'de',    label:'D/E',   get:s=>fix2(s.de)},
+  {key:'econ',  label:'Cons',  get:s=>s.econ==null?na:Math.round(s.econ*100)},
+  {key:'vol',   label:'Vol',   get:s=>s.vol==null?na:Math.round(s.vol)+'%'},
+  {key:'score', label:'Score', cls:'score', get:s=>
+     '<div class="scorewrap"><span class="scoreval">'+s.score+'</span>'+
+     '<span class="scorebar"><i style="width:'+s.score+'%"></i></span></div>'},
+  {key:'signal', label:'Signal', sort:false, get:s=>{
+     const sg = s.signal || {tier:'none',reasons:''};
+     if(sg.tier==='candidate') return '<span class="sig sig-cand" title="'+sg.reasons+'">Candidate</span>';
+     if(sg.tier==='watch')     return '<span class="sig sig-watch" title="'+sg.reasons+'">Watch</span>';
+     return na;
+  }},
+];
+
+// ── Render ───────────────────────────────────────────────────────────────────
+function renderSliders(){
+  const box=document.getElementById('sliders'); box.innerHTML='';
+  FACTORS.forEach(f=>{
+    const d=document.createElement('div'); d.className='factor';
+    d.innerHTML =
+      '<label for="w-'+f.key+'">'+f.label+'<span class="val" id="v-'+f.key+'">'+weights[f.key]+'</span></label>'+
+      '<div class="hint">'+f.hint+'</div>'+
+      '<input type="range" id="w-'+f.key+'" min="0" max="100" value="'+weights[f.key]+'" aria-label="'+f.label+' weight">';
+    box.appendChild(d);
+    d.querySelector('input').addEventListener('input',e=>{
+      weights[f.key]=+e.target.value;
+      document.getElementById('v-'+f.key).textContent=e.target.value;
+      update();
+    });
+  });
+}
+
+function renderHead(){
+  const tr=document.getElementById('head'); tr.innerHTML='';
+  COLS.forEach(c=>{
+    const th=document.createElement('th');
+    const active = c.key===sortKey;
+    th.innerHTML = c.label + (active ? '<span class="arrow">'+(sortDir<0?'▼':'▲')+'</span>' : '');
+    if(c.sort!==false){
+      th.tabIndex=0;
+      th.addEventListener('click',()=>setSort(c.key));
+      th.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();setSort(c.key);}});
+    }
+    tr.appendChild(th);
+  });
+}
+
+function setSort(key){
+  if(sortKey===key){ sortDir*=-1; }
+  else { sortKey=key; sortDir=(key==='pe'||key==='vol'||key==='de'||key==='name'||key==='tkr')?1:-1; }
+  update();
+}
+
+function stateRow(html){
+  return '<tr class="staterow"><td colspan="'+COLS.length+'">'+html+'</td></tr>';
+}
+
+function renderBody(){
+  const tb=document.getElementById('body');
+
+  if(state==='loading'){
+    let rows='';
+    for(let i=0;i<7;i++){
+      rows+='<tr>'+COLS.map(()=>'<td><span class="skel"></span></td>').join('')+'</tr>';
+    }
+    tb.innerHTML=rows; return;
+  }
+  if(state==='empty'){
+    tb.innerHTML=stateRow('<div class="big">No shares to show</div>Your watchlist returned no rows.');
+    return;
+  }
+
+  // sort nulls to the bottom regardless of direction
+  const rows=[...STOCKS].sort((a,b)=>{
+    let av=a[sortKey], bv=b[sortKey];
+    if(typeof av==='string') return (av||'').localeCompare(bv||'')*sortDir;
+    if(av==null) return 1; if(bv==null) return -1;
+    return (av-bv)*sortDir;
+  });
+
+  tb.innerHTML = rows.map((s,i)=>
+    '<tr>'+COLS.map(c=>'<td'+(c.cls?' class="'+c.cls+'"':'')+'>'+c.get(s,i)+'</td>').join('')+'</tr>'
+  ).join('');
+}
+
+function update(){ computeScores(); renderHead(); renderBody(); }
+
+function applyWeights(preset){ weights={...preset}; renderSliders(); update(); }
+document.getElementById('reset').addEventListener('click',()=>applyWeights(DEFAULT_W));
+document.getElementById('preset-buffett').addEventListener('click',()=>applyWeights(BUFFETT_W));
+
+renderSliders();
+renderHead();
+loadData();
+</script>
+</body>
+</html>

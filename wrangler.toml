@@ -1,0 +1,10 @@
+name = "lse-screener"
+main = "screener-worker.js"
+compatibility_date = "2025-01-01"
+
+# Replace PASTE_KV_ID_HERE with the id printed by:
+#   npx wrangler kv namespace create SCREENER
+kv_namespaces = [{ binding = "SCREENER", id = "PASTE_KV_ID_HERE" }]
+
+[triggers]
+crons = ["30 18 * * 1-5"]   # 18:30 UTC weekdays, after the LSE close
