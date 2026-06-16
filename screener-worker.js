@@ -42,6 +42,7 @@ const WATCHLIST = [
 ];
 
 const SNAPSHOT_KEY  = 'snapshot:v1';
+const CURSOR_KEY    = 'cursor:v1';   // index of the next ticker to refresh (round-robin)
 const RET_12M_DAYS  = 365;   // calendar days
 const RET_3M_DAYS   = 91;
 const VOL_WINDOW    = 252;   // trading days (~1yr) of daily returns
@@ -54,19 +55,32 @@ const FUND_TTL_DAYS = 30;    // refetch balance-sheet/earnings at most monthly
 // adapted the fetchers to EODHD/Twelve Data) to restore adjusted TOTAL return.
 const USE_FREE_TIER = true;
 const EPS_YEARS     = 5;     // years of EPS used for the consistency score
+// Free Alpha Vantage caps BOTH ways: 25 calls/day AND 5 calls/minute. The daily
+// cap we manage with caching + a small watchlist; the per-minute cap we manage
+// here by spacing EVERY provider call ≥ this gap apart (≥12s → ≤5/min). One
+// ticker is ≤4 calls (~40s), which is why the refresh is incremental — one ticker
+// per invocation (see refreshNext) rather than the whole list in one go.
+const MIN_CALL_GAP_MS = 13000;
 
 export default {
-  async scheduled(event, env, ctx){ ctx.waitUntil(refresh(env)); },
+  // One ticker per invocation. The cron fires several staggered ticks after the
+  // LSE close (see wrangler.toml), so the round-robin cursor walks the whole
+  // watchlist over a few minutes — each tick is short (≤4 calls, ~40s) and stays
+  // comfortably inside the Worker time limit and the 5-calls/min cap.
+  async scheduled(event, env, ctx){ await refreshNext(env); },
 
-  async fetch(request, env){
+  async fetch(request, env, ctx){
     const cors = {
       'Access-Control-Allow-Origin': '*',           // tighten to your Pages domain
       'Content-Type': 'application/json',
       'Cache-Control': 'public, max-age=900',
     };
     if (new URL(request.url).pathname === '/refresh'){
-      const snap = await refresh(env);
-      return new Response(JSON.stringify({ ok:true, count:snap.count }), { headers:cors });
+      // Manual single step: refresh just the NEXT ticker and return its result.
+      // Awaited inline (≤4 calls, ~40s) — no background waitUntil to be cancelled.
+      // Call it once per ticker to step through the list (5× for a full pass).
+      const r = await refreshNext(env);
+      return new Response(JSON.stringify({ ok:true, ...r }), { headers:cors });
     }
     const cached = await env.SCREENER.get(SNAPSHOT_KEY);
     if (!cached) return new Response(JSON.stringify({ error:'No snapshot yet. Hit /refresh.' }),
@@ -75,17 +89,46 @@ export default {
   },
 };
 
-// ── Refresh the whole watchlist, then cache one snapshot ──────────────────────
-async function refresh(env){
-  const out = [];
-  for (const ticker of WATCHLIST){
-    try { out.push(await fetchOne(ticker, env)); }
-    catch (err){ console.error(`Failed ${ticker}:`, err.message); } // skip, don't abort
-    await sleep(1200); // throttle under per-minute caps; tune per provider
+// ── Refresh exactly ONE ticker (the one at the cursor), then advance ───────────
+// Incremental by design: a single invocation can't make all ~20 calls within the
+// Worker time limit AND the 5/min cap, so each call/tick does one ticker, upserts
+// it into the shared snapshot, and moves the cursor on. A failed ticker keeps its
+// previous snapshot entry (we only overwrite on success) and the cursor still
+// advances, so one bad symbol never wedges the rotation.
+async function refreshNext(env){
+  const idx    = await getCursor(env);
+  const ticker = WATCHLIST[idx];
+  let ok = false;
+  try {
+    const entry = await fetchOne(ticker, env);
+    await upsertStock(env, entry);
+    ok = true;
+  } catch (err){
+    console.error(`Failed ${ticker}:`, err.message);   // keep prior data, don't abort
   }
-  const snapshot = { updated:new Date().toISOString(), count:out.length, stocks:out };
-  await env.SCREENER.put(SNAPSHOT_KEY, JSON.stringify(snapshot));
-  return snapshot;
+  const next = (idx + 1) % WATCHLIST.length;
+  await env.SCREENER.put(CURSOR_KEY, String(next));
+  return { ticker, ok, position: idx + 1, total: WATCHLIST.length, next: WATCHLIST[next],
+    note: ok ? 'Ticker refreshed. Call /refresh again for the next one.'
+             : 'Ticker failed (see `wrangler tail`). Cursor advanced; call /refresh again.' };
+}
+
+// Round-robin cursor, clamped so a watchlist edit can't leave it out of range.
+async function getCursor(env){
+  const n = parseInt(await env.SCREENER.get(CURSOR_KEY), 10);
+  return (Number.isInteger(n) && n >= 0 && n < WATCHLIST.length) ? n : 0;
+}
+
+// Insert-or-replace this ticker in the served snapshot, keeping the others intact.
+async function upsertStock(env, entry){
+  const raw  = await env.SCREENER.get(SNAPSHOT_KEY);
+  const snap = raw ? JSON.parse(raw) : { updated:null, count:0, stocks:[] };
+  if (!Array.isArray(snap.stocks)) snap.stocks = [];
+  const i = snap.stocks.findIndex(s => s.tkr === entry.tkr);
+  if (i >= 0) snap.stocks[i] = entry; else snap.stocks.push(entry);
+  snap.updated = new Date().toISOString();
+  snap.count   = snap.stocks.length;
+  await env.SCREENER.put(SNAPSHOT_KEY, JSON.stringify(snap));
 }
 
 // ── One ticker: price/returns/vol + value/quality fundamentals ────────────────
@@ -139,15 +182,26 @@ async function getQualityExtras(ticker, env){
     const ageDays = (Date.now() - new Date(c.fetchedAt).getTime()) / 86400000;
     if (ageDays < FUND_TTL_DAYS) return { de: c.de, econ: c.econ };
   }
-  // stale or missing → refetch the two reporting-cadence endpoints
-  const [bs, earn] = await Promise.all([
-    fetchBalanceSheet(ticker, env.DATA_API_KEY),
-    fetchEarnings(ticker, env.DATA_API_KEY),
-  ]);
+  // stale or missing → refetch the two reporting-cadence endpoints.
+  // Sequential (not Promise.all) so each goes through the throttle on its own —
+  // firing them in parallel would put 2 calls in the same instant and bust 5/min.
+  const bs   = await fetchBalanceSheet(ticker, env.DATA_API_KEY);
+  const earn = await fetchEarnings(ticker, env.DATA_API_KEY);
   const de   = debtToEquity(bs && bs.annualReports && bs.annualReports[0]);
   const econ = earningsConsistency(earn && earn.annualReports, EPS_YEARS);
   await env.SCREENER.put(key, JSON.stringify({ de, econ, fetchedAt: new Date().toISOString() }));
   return { de, econ };
+}
+
+// ── Per-call throttle: keep every Alpha Vantage call ≥ MIN_CALL_GAP_MS apart so
+//    a burst never trips the free 5-requests/minute cap. Module-scoped clock is
+//    fine here: refresh() awaits calls strictly sequentially.
+let _lastCallAt = 0;
+async function avFetch(url){
+  const wait = _lastCallAt + MIN_CALL_GAP_MS - Date.now();
+  if (wait > 0) await sleep(wait);
+  _lastCallAt = Date.now();
+  return fetch(url).then(r => r.json());
 }
 
 // ── Provider-specific fetches (Alpha Vantage) ────────────────────────────────
@@ -156,7 +210,7 @@ async function fetchSeries(ticker, key, size){
   const url = 'https://www.alphavantage.co/query'
     + `?function=${fn}&symbol=${ticker}`
     + `&outputsize=${size}&apikey=${key}`;
-  const json = await fetch(url).then(r => r.json());
+  const json = await avFetch(url);
   const ts = json['Time Series (Daily)'];
   if (!ts) throw new Error(json.Note || json.Information || json['Error Message'] || 'no series');
   return Object.entries(ts).map(([date, o]) => {
@@ -168,15 +222,15 @@ async function fetchSeries(ticker, key, size){
 
 async function fetchOverview(ticker, key){
   const url = `https://www.alphavantage.co/query?function=OVERVIEW&symbol=${ticker}&apikey=${key}`;
-  return fetch(url).then(r => r.json());
+  return avFetch(url);
 }
 async function fetchBalanceSheet(ticker, key){
   const url = `https://www.alphavantage.co/query?function=BALANCE_SHEET&symbol=${ticker}&apikey=${key}`;
-  return fetch(url).then(r => r.json());
+  return avFetch(url);
 }
 async function fetchEarnings(ticker, key){
   const url = `https://www.alphavantage.co/query?function=EARNINGS&symbol=${ticker}&apikey=${key}`;
-  return fetch(url).then(r => r.json());
+  return avFetch(url);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
