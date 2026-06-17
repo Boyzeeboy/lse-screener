@@ -1,11 +1,11 @@
 # LSE Share Screener
 
 A personal end-of-day screener for London-listed shares. A scheduled Cloudflare
-Worker refreshes the data overnight; a static dashboard ranks the watchlist by a
-weighted blend of four factors — **Momentum** (12m + 3m total return), **Value**
-(low P/E + high yield), **Quality** (ROE + low gearing + earnings consistency)
-and **Stability** (low volatility); an Alpha Vantage MCP connector handles
-ad-hoc deep-dives inside Claude.
+Worker refreshes the data overnight from Yahoo Finance; a static dashboard ranks
+the watchlist by a weighted blend of four factors — **Momentum** (12m + 3m total
+return), **Value** (low P/E + high yield), **Quality** (ROE + low gearing +
+earnings consistency) and **Stability** (low volatility); an Alpha Vantage MCP
+connector handles ad-hoc deep-dives inside Claude.
 
 > Not financial advice. A ranking reflects past data and is a research starting
 > point, not a buy signal.
@@ -24,12 +24,15 @@ dashboard reads that JSON → you. The dashboard never calls the data API direct
 ## Prerequisites
 
 - A Cloudflare account (free tier is fine for hosting).
-- A market-data API key. The free Alpha Vantage tier (~25 calls/day, adjusted
-  history gated) **won't** cover ~20 tickers — use a paid AV key or EODHD /
-  Twelve Data for live use. (Budget ~2 calls/ticker on a normal day; ~4 once a
-  month when the balance-sheet and earnings data refresh — see below.)
 - Node.js installed (for `npx wrangler`).
-- A Claude Pro/Max account (for the MCP connector).
+- A Claude Pro/Max account (for the MCP connector — optional, only for the
+  ad-hoc deep-dives in Part C).
+
+The Worker pulls from Yahoo Finance's unofficial `query1` endpoints — no API
+key, no rate limit. They are unsupported, so if Yahoo ever blocks Cloudflare's
+egress IPs you'd need to fall back to a paid wrapper (RapidAPI yahoo-finance15,
+yahoofinanceapi.com) or another provider (EODHD, Twelve Data). Only the
+`fetch*` functions in `screener-worker.js` are provider-specific.
 
 ---
 
@@ -61,19 +64,13 @@ kv_namespaces = [{ binding = "SCREENER", id = "PASTE_KV_ID_HERE" }]
 crons = ["30 18 * * 1-5"]   # 18:30 UTC, weekdays — after the LSE close
 ```
 
-**4. Store your data API key as a secret** (never hard-code it)
-```bash
-npx wrangler secret put DATA_API_KEY
-# paste the key when prompted
-```
-
-**5. Deploy**
+**4. Deploy**
 ```bash
 npx wrangler deploy
 ```
 You'll get a URL like `https://lse-screener.<you>.workers.dev`. Keep it.
 
-**6. Seed the first snapshot** — the cron hasn't run yet, so populate it once
+**5. Seed the first snapshot** — the cron hasn't run yet, so populate it once
 by hand by visiting:
 ```
 https://lse-screener.<you>.workers.dev/refresh
@@ -81,9 +78,9 @@ https://lse-screener.<you>.workers.dev/refresh
 Then visit the root URL — you should see JSON. After this, the cron keeps it
 fresh automatically.
 
-> **Symbol gotcha:** Alpha Vantage expects the `.LON` suffix for London listings
-> (e.g. `TSCO.LON`), not `.L`. If `/refresh` returns an empty list, edit the
-> `WATCHLIST` in the worker to use `.LON` and redeploy.
+> **Symbol gotcha:** Yahoo expects the `.L` suffix for London listings
+> (e.g. `TSCO.L`), not Alpha Vantage's `.LON`. If `/refresh` returns an empty
+> list, double-check the suffix in `WATCHLIST`.
 
 ---
 
@@ -141,10 +138,10 @@ The loop: *auto-refresh nightly → scan in the morning → deep-dive one or two
 
 - **Change the watchlist:** edit `WATCHLIST` in the worker, redeploy. Add company
   names/tiers to the `META` map in the HTML so they show up labelled.
-- **Quality data cadence:** ROE updates with the daily fundamentals call; gearing
-  (D/E) and earnings consistency come from balance-sheet and earnings reports
-  cached for `FUND_TTL_DAYS` (30) since they only change at reporting time.
+- **Quality data cadence:** all factors refresh on every cron run — Yahoo's
+  `quoteSummary` endpoint returns price-derived (P/E, yield), TTM (ROE) and
+  reporting-cadence (balance sheet, income history) figures in a single call.
 - **Adjust the schedule:** edit the `crons` line in `wrangler.toml`.
 - **Cost:** Pages, Workers and KV sit inside Cloudflare's free tier at this scale.
-  The only real cost is the market-data plan.
+  No data plan needed — Yahoo's unofficial endpoints are free.
 - **Re-seed any time:** hit `/refresh` to force an immediate update.

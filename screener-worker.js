@@ -1,27 +1,27 @@
 // ───────────────────────────────────────────────────────────────────────────
-// LSE Screener — Cloudflare Worker (data pipeline)  ·  v3: durable-quality
+// LSE Screener — Cloudflare Worker (data pipeline)  ·  v4: Yahoo Finance
 //
 // What it does:
 //   1. On a daily cron, builds a price history per ticker and derives 12-month
 //      return, 3-month return and annualised volatility; reads P/E, yield and
-//      ROE from a fundamentals call; and derives a QUALITY pair — debt-to-equity
-//      (gearing) and earnings consistency — from balance-sheet & earnings data.
+//      ROE from a quoteSummary call; and derives a QUALITY pair — debt-to-equity
+//      (gearing) and earnings consistency — from balance-sheet & income data.
 //      Caches one JSON snapshot.
 //   2. On HTTP GET, serves that snapshot to the static dashboard.
 //
-// The maths (totalReturn / annualisedVol / debtToEquity / earningsConsistency
-// and helpers) is unit-tested against known inputs — don't tweak it casually.
+// The maths (totalReturn / annualisedVol / earningsConsistency and helpers) is
+// unit-tested against known inputs — don't tweak it casually.
 //
-// ── Call budget (matters on metered tiers) ───────────────────────────────────
-//   • Daily per ticker: series (compact) + OVERVIEW = ~2 calls.
-//   • Monthly per ticker: + BALANCE_SHEET + EARNINGS = 2 more, cached for
-//     FUND_TTL_DAYS so they don't refetch daily (these only change at reporting).
-//   So most days cost ~2 calls/ticker; once a month, ~4. The free Alpha Vantage
-//   tier (25/day, adjusted history gated) still won't cover ~20 tickers — use a
-//   paid AV key or EODHD / Twelve Data. Only the fetch* functions are
-//   provider-specific; the maths and caching are not.
+// ── Provider ────────────────────────────────────────────────────────────────
+// Uses Yahoo Finance's *unofficial* query endpoints (v8/finance/chart and
+// v10/finance/quoteSummary). No API key needed, but quoteSummary requires a
+// crumb+cookie pair obtained per-session from Yahoo's consent flow. Trade-off:
+// unsupported, can break without notice. If a future Yahoo change blocks the
+// Worker's egress IPs, fall back to a paid wrapper (RapidAPI yahoo-finance15,
+// yahoofinanceapi.com) or another provider (EODHD, Twelve Data) — only the
+// fetch* functions are provider-specific; the maths and caching are not.
 //
-// ── Setup ────────────────────────────────────────────────────────────────────
+// ── Setup ───────────────────────────────────────────────────────────────────
 //   wrangler.toml:
 //     name = "lse-screener"
 //     main = "screener-worker.js"
@@ -29,57 +29,37 @@
 //     kv_namespaces = [{ binding = "SCREENER", id = "<your-kv-id>" }]
 //     [triggers]
 //     crons = ["30 18 * * 1-5"]   # 18:30 UTC weekdays, after LSE close
-//   Secret:  npx wrangler secret put DATA_API_KEY
+//   No secret required — Yahoo's unofficial endpoints are unauthenticated.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const WATCHLIST = [
-  // Trimmed to 5 with the .LON suffix Alpha Vantage uses for LSE, to stay inside
-  // the free 25-calls/day cap while you test. Expand once on a paid/other plan.
-  'SHEL.LON','AZN.LON','HSBA.LON','ULVR.LON','TSCO.LON',
-  // Full set (re-enable later):
-  // 'BP.LON','GSK.LON','RIO.LON','BATS.LON','DGE.LON','LSEG.LON','REL.LON',
-  // 'NG.LON','RR.LON','BARC.LON','LLOY.LON','VOD.LON','GLEN.LON','PRU.LON','AAL.LON',
+  // Yahoo uses .L (not Alpha Vantage's .LON) for LSE listings.
+  'SHEL.L','AZN.L','HSBA.L','ULVR.L','TSCO.L',
+  'BP.L','GSK.L','RIO.L','BATS.L','DGE.L','LSEG.L','REL.L',
+  'NG.L','RR.L','BARC.L','LLOY.L','VOD.L','GLEN.L','PRU.L','AAL.L',
 ];
 
-const SNAPSHOT_KEY  = 'snapshot:v1';
-const CURSOR_KEY    = 'cursor:v1';   // index of the next ticker to refresh (round-robin)
-const RET_12M_DAYS  = 365;   // calendar days
-const RET_3M_DAYS   = 91;
-const VOL_WINDOW    = 252;   // trading days (~1yr) of daily returns
-const SERIES_KEEP   = 520;   // ~2yr of price points retained per ticker
-const FUND_TTL_DAYS = 30;    // refetch balance-sheet/earnings at most monthly
-// Free Alpha Vantage tier: uses TIME_SERIES_DAILY (raw close) + compact history,
-// the endpoints a free key can reach. This means PRICE return (dividends
-// excluded) and ~100 days of history, so 12-month return fills in only after the
-// daily cache accrues a year. Set false once you have a premium AV key (or have
-// adapted the fetchers to EODHD/Twelve Data) to restore adjusted TOTAL return.
-const USE_FREE_TIER = true;
-const EPS_YEARS     = 5;     // years of EPS used for the consistency score
-// Free Alpha Vantage caps BOTH ways: 25 calls/day AND 5 calls/minute. The daily
-// cap we manage with caching + a small watchlist; the per-minute cap we manage
-// here by spacing EVERY provider call ≥ this gap apart (≥12s → ≤5/min). One
-// ticker is ≤4 calls (~40s), which is why the refresh is incremental — one ticker
-// per invocation (see refreshNext) rather than the whole list in one go.
-const MIN_CALL_GAP_MS = 13000;
+const SNAPSHOT_KEY = 'snapshot:v1';
+const RET_12M_DAYS = 365;   // calendar days
+const RET_3M_DAYS  = 91;
+const VOL_WINDOW   = 252;   // trading days (~1yr) of daily returns
+const EPS_YEARS    = 5;     // years of EPS used for the consistency score
+const BATCH_SIZE   = 5;     // tickers per parallel batch (5 × 2 calls = 10 concurrent)
+
+const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
 
 export default {
-  // One ticker per invocation. The cron fires several staggered ticks after the
-  // LSE close (see wrangler.toml), so the round-robin cursor walks the whole
-  // watchlist over a few minutes — each tick is short (≤4 calls, ~40s) and stays
-  // comfortably inside the Worker time limit and the 5-calls/min cap.
-  async scheduled(event, env, ctx){ await refreshNext(env); },
+  async scheduled(event, env, ctx){ await refreshAll(env); },
 
   async fetch(request, env, ctx){
     const cors = {
-      'Access-Control-Allow-Origin': 'https://lse-screener.pages.dev',  // dashboard origin
+      'Access-Control-Allow-Origin': 'https://lse-screener.pages.dev',
       'Content-Type': 'application/json',
       'Cache-Control': 'public, max-age=900',
     };
-    if (new URL(request.url).pathname === '/refresh'){
-      // Manual single step: refresh just the NEXT ticker and return its result.
-      // Awaited inline (≤4 calls, ~40s) — no background waitUntil to be cancelled.
-      // Call it once per ticker to step through the list (5× for a full pass).
-      const r = await refreshNext(env);
+    const path = new URL(request.url).pathname;
+    if (path === '/refresh'){
+      const r = await refreshAll(env);
       return new Response(JSON.stringify({ ok:true, ...r }), { headers:cors });
     }
     const cached = await env.SCREENER.get(SNAPSHOT_KEY);
@@ -89,148 +69,158 @@ export default {
   },
 };
 
-// ── Refresh exactly ONE ticker (the one at the cursor), then advance ───────────
-// Incremental by design: a single invocation can't make all ~20 calls within the
-// Worker time limit AND the 5/min cap, so each call/tick does one ticker, upserts
-// it into the shared snapshot, and moves the cursor on. A failed ticker keeps its
-// previous snapshot entry (we only overwrite on success) and the cursor still
-// advances, so one bad symbol never wedges the rotation.
-async function refreshNext(env){
-  const idx    = await getCursor(env);
-  const ticker = WATCHLIST[idx];
-  let ok = false;
-  try {
-    const entry = await fetchOne(ticker, env);
-    await upsertStock(env, entry);
-    ok = true;
-  } catch (err){
-    console.error(`Failed ${ticker}:`, err.message);   // keep prior data, don't abort
+// ── Yahoo crumb/cookie auth ─────────────────────────────────────────────────
+// Yahoo's v10 quoteSummary requires a crumb+cookie obtained per-session. The
+// v8 chart endpoint works without it, but we need both per ticker.
+async function getYahooCrumb(){
+  // Step 1: hit fc.yahoo.com to receive consent cookies
+  const consentRes = await fetch('https://fc.yahoo.com/', {
+    headers: { 'User-Agent': UA },
+    redirect: 'manual',
+  });
+  // Consume body to avoid stalled-response warning
+  await consentRes.text();
+  const setCookies = consentRes.headers.getAll('set-cookie');
+  const cookieStr = setCookies.map(c => c.split(';')[0]).join('; ');
+
+  // Step 2: exchange cookies for a crumb token
+  const crumbRes = await fetch('https://query2.finance.yahoo.com/v1/test/getcrumb', {
+    headers: { 'User-Agent': UA, 'Cookie': cookieStr },
+  });
+  if (!crumbRes.ok) throw new Error(`Crumb fetch HTTP ${crumbRes.status}`);
+  const crumb = await crumbRes.text();
+  return { crumb, cookies: cookieStr };
+}
+
+// ── Refresh the whole watchlist in batches ───────────────────────────────────
+// Batches of BATCH_SIZE tickers run in parallel; batches run sequentially. Each
+// ticker makes 2 sequential HTTP calls (chart then quoteSummary), so at most
+// BATCH_SIZE × 2 connections are open at once. A failed ticker keeps its prior
+// snapshot entry.
+async function refreshAll(env){
+  const auth = await getYahooCrumb();
+
+  const raw = await env.SCREENER.get(SNAPSHOT_KEY);
+  const prior = raw ? JSON.parse(raw) : { stocks:[] };
+  const priorByTkr = new Map((prior.stocks || []).map(s => [s.tkr, s]));
+
+  const results = [];
+  let ok = 0;
+
+  for (let i = 0; i < WATCHLIST.length; i += BATCH_SIZE){
+    const batch = WATCHLIST.slice(i, i + BATCH_SIZE);
+    const settled = await Promise.allSettled(batch.map(t => fetchOne(t, auth)));
+    settled.forEach((r, j) => {
+      const tkr = batch[j].split('.')[0];
+      if (r.status === 'fulfilled'){
+        results.push(r.value);
+        ok++;
+      } else {
+        console.error(`Failed ${batch[j]}:`, r.reason && r.reason.message);
+        const p = priorByTkr.get(tkr);
+        if (p) results.push(p);
+      }
+    });
   }
-  const next = (idx + 1) % WATCHLIST.length;
-  await env.SCREENER.put(CURSOR_KEY, String(next));
-  return { ticker, ok, position: idx + 1, total: WATCHLIST.length, next: WATCHLIST[next],
-    note: ok ? 'Ticker refreshed. Call /refresh again for the next one.'
-             : 'Ticker failed (see `wrangler tail`). Cursor advanced; call /refresh again.' };
-}
 
-// Round-robin cursor, clamped so a watchlist edit can't leave it out of range.
-async function getCursor(env){
-  const n = parseInt(await env.SCREENER.get(CURSOR_KEY), 10);
-  return (Number.isInteger(n) && n >= 0 && n < WATCHLIST.length) ? n : 0;
-}
-
-// Insert-or-replace this ticker in the served snapshot, keeping the others intact.
-async function upsertStock(env, entry){
-  const raw  = await env.SCREENER.get(SNAPSHOT_KEY);
-  const snap = raw ? JSON.parse(raw) : { updated:null, count:0, stocks:[] };
-  if (!Array.isArray(snap.stocks)) snap.stocks = [];
-  const i = snap.stocks.findIndex(s => s.tkr === entry.tkr);
-  if (i >= 0) snap.stocks[i] = entry; else snap.stocks.push(entry);
-  snap.updated = new Date().toISOString();
-  snap.count   = snap.stocks.length;
+  const snap = { updated: new Date().toISOString(), count: results.length, stocks: results };
   await env.SCREENER.put(SNAPSHOT_KEY, JSON.stringify(snap));
+  return { refreshed: ok, failed: WATCHLIST.length - ok, total: WATCHLIST.length };
 }
 
-// ── One ticker: price/returns/vol + value/quality fundamentals ────────────────
-async function fetchOne(ticker, env){
-  const series   = await getSeries(ticker, env);          // ascending by date
-  const overview = await fetchOverview(ticker, env.DATA_API_KEY);
-  const extras   = await getQualityExtras(ticker, env);   // {de, econ}, cached monthly
-  const latest   = series[series.length - 1] || null;
+// ── One ticker: price/returns/vol + value/quality fundamentals ───────────────
+// Calls are sequential within a ticker to ensure each response body is fully
+// consumed before the next fires — prevents CF's stalled-response deadlock.
+async function fetchOne(ticker, auth){
+  const series = await fetchSeries(ticker);
+  const f      = await fetchFundamentals(ticker, auth);
+  const latest = series[series.length - 1] || null;
 
   return {
     tkr:   ticker.split('.')[0],
-    price: latest ? Math.round(latest.close) : null,  // raw close = actual price
+    price: latest ? Math.round(latest.close) : null,
     r12:   totalReturn(series, RET_12M_DAYS),
     r3:    totalReturn(series, RET_3M_DAYS),
     vol:   annualisedVol(series, VOL_WINDOW),
-    pe:    num(overview.PERatio),
-    yield: pctNum(overview.DividendYield),            // AV gives a decimal → %
-    roe:   pctNum(overview.ReturnOnEquityTTM),
-    de:    extras.de,                                 // debt-to-equity (lower better)
-    econ:  extras.econ,                               // earnings consistency 0..1
+    pe:    num(f.pe),
+    yield: pctNum(f.divYieldDecimal),
+    roe:   pctNum(f.roeDecimal),
+    de:    f.de,
+    econ:  earningsConsistency(f.epsAnnual, EPS_YEARS),
   };
 }
 
-// ── Price series with delta caching: full once, then top up with compact ─────
-async function getSeries(ticker, env){
-  const key = 'series:' + ticker;
-  const cachedRaw = await env.SCREENER.get(key);
-  const cached = cachedRaw ? JSON.parse(cachedRaw) : null;
-
-  const size = USE_FREE_TIER ? 'compact'
-             : ((cached && cached.length > 150) ? 'compact' : 'full');
-  const fresh = await fetchSeries(ticker, env.DATA_API_KEY, size);
-
-  const byDate = new Map();
-  (cached || []).forEach(p => byDate.set(p.date, p));
-  fresh.forEach(p => byDate.set(p.date, p));        // fresh overwrites stale
-  const merged = [...byDate.values()]
-    .sort((a, b) => a.date < b.date ? -1 : 1)
-    .slice(-SERIES_KEEP);
-
-  await env.SCREENER.put(key, JSON.stringify(merged));
-  return merged;
+// ── Provider-specific fetches (Yahoo Finance) ────────────────────────────────
+async function yahooJson(url){
+  const res = await fetch(url, {
+    headers: { 'User-Agent': UA, 'Accept': 'application/json' },
+  });
+  if (!res.ok) throw new Error(`Yahoo ${new URL(url).pathname} HTTP ${res.status}`);
+  return res.json();
 }
 
-// ── Quality extras (gearing + earnings consistency), cached monthly ───────────
-async function getQualityExtras(ticker, env){
-  const key = 'fund:' + ticker;
-  const cachedRaw = await env.SCREENER.get(key);
-  if (cachedRaw){
-    const c = JSON.parse(cachedRaw);
-    const ageDays = (Date.now() - new Date(c.fetchedAt).getTime()) / 86400000;
-    if (ageDays < FUND_TTL_DAYS) return { de: c.de, econ: c.econ };
+async function yahooJsonAuth(url, auth){
+  const sep = url.includes('?') ? '&' : '?';
+  const res = await fetch(`${url}${sep}crumb=${encodeURIComponent(auth.crumb)}`, {
+    headers: { 'User-Agent': UA, 'Accept': 'application/json', 'Cookie': auth.cookies },
+  });
+  if (!res.ok) throw new Error(`Yahoo ${new URL(url).pathname} HTTP ${res.status}`);
+  return res.json();
+}
+
+async function fetchSeries(ticker){
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}`
+    + '?range=2y&interval=1d&events=div%2Csplit';
+  const json = await yahooJson(url);
+  const result = json && json.chart && json.chart.result && json.chart.result[0];
+  if (!result) throw new Error(
+    (json && json.chart && json.chart.error && json.chart.error.description) || 'no series');
+  const ts = result.timestamp || [];
+  const close = (result.indicators && result.indicators.quote
+    && result.indicators.quote[0] && result.indicators.quote[0].close) || [];
+  const adj = (result.indicators && result.indicators.adjclose
+    && result.indicators.adjclose[0] && result.indicators.adjclose[0].adjclose) || [];
+  const out = [];
+  for (let i = 0; i < ts.length; i++){
+    const c = close[i];
+    if (!Number.isFinite(c)) continue;
+    const date = new Date(ts[i] * 1000).toISOString().slice(0, 10);
+    const a = Number.isFinite(adj[i]) ? adj[i] : c;
+    out.push({ date, close: c, adj: a });
   }
-  // stale or missing → refetch the two reporting-cadence endpoints.
-  // Sequential (not Promise.all) so each goes through the throttle on its own —
-  // firing them in parallel would put 2 calls in the same instant and bust 5/min.
-  const bs   = await fetchBalanceSheet(ticker, env.DATA_API_KEY);
-  const earn = await fetchEarnings(ticker, env.DATA_API_KEY);
-  const de   = debtToEquity(bs && bs.annualReports && bs.annualReports[0]);
-  const econ = earningsConsistency(earn && earn.annualReports, EPS_YEARS);
-  await env.SCREENER.put(key, JSON.stringify({ de, econ, fetchedAt: new Date().toISOString() }));
-  return { de, econ };
+  out.sort((a, b) => a.date < b.date ? -1 : 1);
+  return out;
 }
 
-// ── Per-call throttle: keep every Alpha Vantage call ≥ MIN_CALL_GAP_MS apart so
-//    a burst never trips the free 5-requests/minute cap. Module-scoped clock is
-//    fine here: refresh() awaits calls strictly sequentially.
-let _lastCallAt = 0;
-async function avFetch(url){
-  const wait = _lastCallAt + MIN_CALL_GAP_MS - Date.now();
-  if (wait > 0) await sleep(wait);
-  _lastCallAt = Date.now();
-  return fetch(url).then(r => r.json());
+async function fetchFundamentals(ticker, auth){
+  const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(ticker)}`
+    + '?modules=summaryDetail%2CdefaultKeyStatistics%2CfinancialData%2CincomeStatementHistory';
+  const json = await yahooJsonAuth(url, auth);
+  const r = json && json.quoteSummary && json.quoteSummary.result && json.quoteSummary.result[0];
+  if (!r) throw new Error(
+    (json && json.quoteSummary && json.quoteSummary.error && json.quoteSummary.error.description) || 'no fundamentals');
+  const sd = r.summaryDetail || {};
+  const fd = r.financialData || {};
+  const ks = r.defaultKeyStatistics || {};
+  const incHist = (r.incomeStatementHistory && r.incomeStatementHistory.incomeStatementHistory) || [];
+
+  // Yahoo's financialData.debtToEquity is pre-computed as a percentage (e.g.
+  // 43.32 = 43.32%) — convert to a ratio (0.4332) to match the dashboard.
+  const rawDE = pickRaw(fd.debtToEquity);
+  return {
+    pe:              pickRaw(sd.trailingPE, ks.trailingPE),
+    divYieldDecimal: pickRaw(sd.dividendYield, sd.trailingAnnualDividendYield),
+    roeDecimal:      pickRaw(fd.returnOnEquity),
+    de:              rawDE != null ? rawDE / 100 : null,
+    epsAnnual:       incHist.map(s => ({ reportedEPS: pickRaw(s.netIncome) })),
+  };
 }
 
-// ── Provider-specific fetches (Alpha Vantage) ────────────────────────────────
-async function fetchSeries(ticker, key, size){
-  const fn = USE_FREE_TIER ? 'TIME_SERIES_DAILY' : 'TIME_SERIES_DAILY_ADJUSTED';
-  const url = 'https://www.alphavantage.co/query'
-    + `?function=${fn}&symbol=${ticker}`
-    + `&outputsize=${size}&apikey=${key}`;
-  const json = await avFetch(url);
-  const ts = json['Time Series (Daily)'];
-  if (!ts) throw new Error(json.Note || json.Information || json['Error Message'] || 'no series');
-  return Object.entries(ts).map(([date, o]) => {
-    const raw = parseFloat(o['4. close']);
-    const adj = parseFloat(o['5. adjusted close']);                  // absent on the free endpoint
-    return { date, close: raw, adj: Number.isFinite(adj) ? adj : raw };  // → falls back to raw close
-  }).sort((a, b) => a.date < b.date ? -1 : 1);
-}
-
-async function fetchOverview(ticker, key){
-  const url = `https://www.alphavantage.co/query?function=OVERVIEW&symbol=${ticker}&apikey=${key}`;
-  return avFetch(url);
-}
-async function fetchBalanceSheet(ticker, key){
-  const url = `https://www.alphavantage.co/query?function=BALANCE_SHEET&symbol=${ticker}&apikey=${key}`;
-  return avFetch(url);
-}
-async function fetchEarnings(ticker, key){
-  const url = `https://www.alphavantage.co/query?function=EARNINGS&symbol=${ticker}&apikey=${key}`;
-  return avFetch(url);
+function pickRaw(...candidates){
+  for (const c of candidates){
+    if (c && Number.isFinite(c.raw)) return c.raw;
+  }
+  return null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -265,35 +255,18 @@ function annualisedVol(series, window){
   const variance = rets.reduce((s, x) => s + (x - mean) ** 2, 0) / (rets.length - 1);
   return Math.sqrt(variance) * Math.sqrt(252) * 100;
 }
-// Debt-to-equity (lower better). Negative/zero equity → null (often buyback-
-// driven, not necessarily distress — safer to skip than mis-rank as low-geared).
-function debtToEquity(report){
-  if (!report) return null;
-  const eq = num(report.totalShareholderEquity);
-  if (eq == null || eq <= 0) return null;
-  let debt = num(report.shortLongTermDebtTotal);
-  if (debt == null){
-    const s = num(report.shortTermDebt) || 0;
-    const l = num(report.longTermDebt) || 0;
-    debt = (report.shortTermDebt == null && report.longTermDebt == null) ? null : s + l;
-  }
-  if (debt == null) return null;
-  return debt / eq;
-}
-// Earnings consistency 0..1 (higher better). Rewards reliably-positive, smoothly
-// changing EPS; penalises loss years and erratic swings. null if < 3 years.
 function earningsConsistency(annualReports, maxYears){
   if (!Array.isArray(annualReports)) return null;
   const eps = annualReports.slice(0, maxYears).map(r => num(r.reportedEPS)).filter(v => v != null);
   if (eps.length < 3) return null;
   const posFrac = eps.filter(v => v > 0).length / eps.length;
-  const chron = [...eps].reverse();                  // oldest → newest
+  const chron = [...eps].reverse();
   const g = [];
   for (let i = 1; i < chron.length; i++){
     const prev = chron[i-1];
     if (prev !== 0){
       let r = (chron[i] - prev) / Math.abs(prev);
-      r = Math.max(-1, Math.min(1, r));              // cap ±100%
+      r = Math.max(-1, Math.min(1, r));
       g.push(r);
     }
   }
@@ -306,7 +279,5 @@ function earningsConsistency(annualReports, maxYears){
   return posFrac * smoothness;
 }
 
-// ── Small parse helpers ───────────────────────────────────────────────────────
 const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
 const pctNum = v => { const n = parseFloat(v); return Number.isFinite(n) ? n * 100 : null; };
-const sleep = ms => new Promise(r => setTimeout(r, ms));

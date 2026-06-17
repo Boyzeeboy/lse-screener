@@ -7,13 +7,6 @@ compatibility_date = "2025-01-01"
 kv_namespaces = [{ binding = "SCREENER", id = "dc167c170fe241be8a9013a63abcee4c" }]
 
 [triggers]
-# Incremental refresh: one ticker per tick. Five staggered ticks 2 min apart,
-# 18:30–18:38 UTC weekdays (after the LSE close), walk the 5-ticker watchlist in
-# one daily pass. Add more ticks here if you grow the watchlist (one per ticker).
-crons = [
-  "30 18 * * 1-5",
-  "32 18 * * 1-5",
-  "34 18 * * 1-5",
-  "36 18 * * 1-5",
-  "38 18 * * 1-5",
-]
+# Yahoo has no per-key rate limit, so one cron now refreshes the whole watchlist
+# in parallel. 18:30 UTC weekdays — after the LSE close.
+crons = ["30 18 * * 1-5"]
