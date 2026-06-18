@@ -19,6 +19,38 @@ the Worker does — then use the prompts below.
 
 ---
 
+## Day-to-day research process
+
+The placeholders work in two layers, and it helps to keep them straight:
+
+1. **Start the session — paste House Definitions once, verbatim.** Copy the
+   whole **House Definitions** block exactly as written and leave `{TICKER}`
+   as the literal placeholder. You are not researching a stock yet — you are
+   teaching Claude the rule ("when I name a ticker, fetch
+   `…/stock/{TICKER}`") so every metric is computed the house way. Don't
+   substitute a real symbol here.
+
+2. **Run a prompt — now substitute the real values.** Pick a numbered prompt
+   below, copy it, and replace each placeholder with an actual value before
+   sending:
+   - `{TICKER}` → the short symbol, no `.L`, for the Worker API (e.g. `HSBA`).
+   - `{TICKER}.L` → keep the `.L` suffix for Yahoo Finance searches (e.g.
+     `HSBA.L`). Both refer to the same stock; only the Worker endpoint drops
+     the suffix.
+   - `{TICKER_A}` / `{TICKER_B}` → the two symbols in a comparison (prompt 3).
+   - `{X}` / `{Y}` → the figures the Worker returned, when a prompt asks Claude
+     to verify them (prompt 4).
+
+3. **Stay in one session.** Because House Definitions is pasted once, you can
+   fire off several numbered prompts back-to-back and Claude keeps using the
+   same definitions. Start a fresh session and you re-paste House Definitions
+   first.
+
+In short: leave `{TICKER}` as-is in House Definitions; swap it for a real
+symbol everywhere in the numbered prompts.
+
+---
+
 ## House Definitions (paste once per session)
 
 ```

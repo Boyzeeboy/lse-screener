@@ -77,6 +77,10 @@
   input[type=range]:focus-visible{outline:2px solid var(--primary);outline-offset:4px}
   input[type=range]:disabled{opacity:.4;cursor:not-allowed}
 
+  .strategy-read{margin-top:16px;padding:12px 16px;background:var(--primary-soft);border-radius:var(--radius);font-size:13px;line-height:1.5;color:var(--ink);border-left:3px solid var(--primary)}
+  .strategy-read .strat-label{font-weight:600;margin-right:4px}
+  .strategy-read .strat-detail{color:var(--muted);font-size:12px;display:block;margin-top:4px}
+
   /* Table */
   .tablecard{background:var(--surface);border:1px solid var(--hair);border-radius:8px;overflow:hidden;box-shadow:var(--shadow)}
   .tablescroll{overflow-x:auto}
@@ -151,6 +155,7 @@
       </div>
     </div>
     <div class="sliders" id="sliders"></div>
+    <div class="strategy-read" id="strategy-read"></div>
   </section>
 
   <div class="tablecard">
@@ -400,9 +405,77 @@ function renderSliders(){
     d.querySelector('input').addEventListener('input',e=>{
       weights[f.key]=+e.target.value;
       document.getElementById('v-'+f.key).textContent=e.target.value;
+      updateStrategyRead();
       update();
     });
   });
+}
+
+function updateStrategyRead(){
+  const el = document.getElementById('strategy-read');
+  const {momentum:m, value:v, quality:q, stability:s} = weights;
+  const total = m+v+q+s || 1;
+  const pm=m/total, pv=v/total, pq=q/total, ps=s/total;
+
+  // Rank factors by weight
+  const ranked = [
+    {name:'Momentum',pct:pm,w:m}, {name:'Value',pct:pv,w:v},
+    {name:'Quality',pct:pq,w:q}, {name:'Stability',pct:ps,w:s}
+  ].sort((a,b)=>b.pct-a.pct);
+  const top = ranked[0], second = ranked[1];
+  const active = ranked.filter(f=>f.w>0);
+
+  // All zeroed out
+  if(active.length===0){
+    el.innerHTML='<span class="strat-label">No weights set.</span> Move the sliders to define your screening priorities.';
+    return;
+  }
+
+  // Name the style
+  let style = '';
+  if(active.length===1) style = 'Pure '+active[0].name;
+  else if(top.pct>=0.6) style = top.name+'-dominated';
+  else if(Math.abs(top.pct-second.pct)<0.05) style = top.name+' + '+second.name+' blend';
+  else style = top.name+'-led, '+second.name+'-supported';
+
+  // Plain-English interpretation of what this actually screens for
+  const parts = [];
+  if(m>0){
+    if(pm>=0.5) parts.push('heavily favouring shares that have been rising recently — trend-following');
+    else if(pm>=0.25) parts.push('rewarding recent price strength');
+    else parts.push('giving a small nod to recent momentum');
+  }
+  if(v>0){
+    if(pv>=0.5) parts.push('prioritising cheap valuations (low P/E, higher yield) — contrarian, income-leaning');
+    else if(pv>=0.25) parts.push('looking for reasonable valuations and yield');
+    else parts.push('with a light value filter');
+  }
+  if(q>0){
+    if(pq>=0.5) parts.push('demanding strong profitability, low debt, and consistent earnings — quality-first');
+    else if(pq>=0.25) parts.push('preferring well-run, financially sound businesses');
+    else parts.push('with a modest quality check');
+  }
+  if(s>0){
+    if(ps>=0.5) parts.push('strongly penalising volatile share prices — defensive, low-drama');
+    else if(ps>=0.25) parts.push('preferring a smoother ride (lower volatility)');
+    else parts.push('with a slight stability preference');
+  }
+
+  const detail = parts.join('; ')+'.';
+
+  // Comparable style label
+  let archetype = '';
+  if(pq>=0.4 && pv>=0.25 && pm<0.1) archetype = 'Closest to: Buffett / quality-value';
+  else if(pm>=0.5) archetype = 'Closest to: trend-following / momentum';
+  else if(pv>=0.5) archetype = 'Closest to: deep-value / contrarian';
+  else if(ps>=0.5) archetype = 'Closest to: low-volatility / defensive';
+  else if(pq>=0.5) archetype = 'Closest to: quality-compounder';
+  else if(pv>=0.3 && ps>=0.3) archetype = 'Closest to: income / dividend';
+  else if(pm>=0.25 && pq>=0.25) archetype = 'Closest to: quality-momentum (GARP-ish)';
+
+  el.innerHTML =
+    '<span class="strat-label">'+style+'</span> — '+detail+
+    (archetype ? '<span class="strat-detail">'+archetype+'</span>' : '');
 }
 
 function renderHead(){
@@ -460,11 +533,12 @@ function renderBody(){
 
 function update(){ computeScores(); renderHead(); renderBody(); }
 
-function applyWeights(preset){ weights={...preset}; renderSliders(); update(); }
+function applyWeights(preset){ weights={...preset}; renderSliders(); updateStrategyRead(); update(); }
 document.getElementById('reset').addEventListener('click',()=>applyWeights(DEFAULT_W));
 document.getElementById('preset-buffett').addEventListener('click',()=>applyWeights(BUFFETT_W));
 
 renderSliders();
+updateStrategyRead();
 renderHead();
 loadData();
 </script>
