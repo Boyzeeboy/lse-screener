@@ -369,22 +369,22 @@ const fix2 = v=> v==null ? na : v.toFixed(2);
 const intg = v=> v==null ? na : Math.round(v).toLocaleString();
 
 const COLS = [
-  {key:'rank',  label:'#',     get:(s,i)=>'<span class="rank">'+(i+1)+'</span>', sort:false},
-  {key:'tkr',   label:'Ticker',cls:'tkr', get:s=>s.tkr+(s.tier?'<span class="tier">'+s.tier+'</span>':'')},
-  {key:'name',  label:'Company',cls:'name',get:s=>s.name||''},
-  {key:'price', label:'Price (p)', get:s=>intg(s.price)},
-  {key:'r12',   label:'12m',   get:s=>ret(s.r12)},
-  {key:'r3',    label:'3m',    get:s=>ret(s.r3)},
-  {key:'pe',    label:'P/E',   get:s=>fix1(s.pe)},
-  {key:'yield', label:'Yield', get:s=>fix1(s.yield,'%')},
-  {key:'roe',   label:'ROE',   get:s=>fix1(s.roe,'%')},
-  {key:'de',    label:'D/E',   get:s=>fix2(s.de)},
-  {key:'econ',  label:'Cons',  get:s=>s.econ==null?na:Math.round(s.econ*100)},
-  {key:'vol',   label:'Vol',   get:s=>s.vol==null?na:Math.round(s.vol)+'%'},
-  {key:'score', label:'Score', cls:'score', get:s=>
+  {key:'rank',  label:'#',     tip:'Position in the current ranking based on your factor weights', get:(s,i)=>'<span class="rank">'+(i+1)+'</span>', sort:false},
+  {key:'tkr',   label:'Ticker',tip:'LSE ticker symbol and index tier (FTSE 100 / 250)', cls:'tkr', get:s=>s.tkr+(s.tier?'<span class="tier">'+s.tier+'</span>':'')},
+  {key:'name',  label:'Company',tip:'Company name', cls:'name',get:s=>s.name||''},
+  {key:'price', label:'Price (p)',tip:'Latest share price in pence', get:s=>intg(s.price)},
+  {key:'r12',   label:'12m',   tip:'12-month total return — how much the share price has moved over the past year',get:s=>ret(s.r12)},
+  {key:'r3',    label:'3m',    tip:'3-month total return — recent price momentum over the last quarter',get:s=>ret(s.r3)},
+  {key:'pe',    label:'P/E',   tip:'Price-to-Earnings ratio — lower generally means cheaper relative to profits. A high P/E may signal growth expectations or overvaluation',get:s=>fix1(s.pe)},
+  {key:'yield', label:'Yield', tip:'Dividend yield — annual dividends as a percentage of the share price. Higher yield means more income per pound invested',get:s=>fix1(s.yield,'%')},
+  {key:'roe',   label:'ROE',   tip:'Return on Equity — how efficiently the company turns shareholder capital into profit. Higher is generally better',get:s=>fix1(s.roe,'%')},
+  {key:'de',    label:'D/E',   tip:'Debt-to-Equity ratio — how much debt the company carries relative to shareholder equity. Lower means less financial risk',get:s=>fix2(s.de)},
+  {key:'econ',  label:'Cons',  tip:'Earnings Consistency (0–100) — how reliably profitable and smooth the company’s earnings have been. Higher means more predictable',get:s=>s.econ==null?na:Math.round(s.econ*100)},
+  {key:'vol',   label:'Vol',   tip:'Annualised volatility — how much the share price swings. Lower means a steadier, less bumpy ride',get:s=>s.vol==null?na:Math.round(s.vol)+'%'},
+  {key:'score', label:'Score', tip:'Composite score (0–100) — percentile blend of all factors using your current weights. 100 = best-in-list on your priorities',cls:'score', get:s=>
      '<div class="scorewrap"><span class="scoreval">'+s.score+'</span>'+
      '<span class="scorebar"><i style="width:'+s.score+'%"></i></span></div>'},
-  {key:'signal', label:'Signal', sort:false, get:s=>{
+  {key:'signal', label:'Signal',tip:'Research flag — Candidate: clears all gates (score ≥70, consistency ≥0.5, P/E ≤22, 3m return ≥0, no dividend trap). Watch: top-ranked but failing a gate. Not advice.',sort:false, get:s=>{
      const sg = s.signal || {tier:'none',reasons:''};
      if(sg.tier==='candidate') return '<span class="sig sig-cand" title="'+sg.reasons+'">Candidate</span>';
      if(sg.tier==='watch')     return '<span class="sig sig-watch" title="'+sg.reasons+'">Watch</span>';
@@ -482,6 +482,7 @@ function renderHead(){
   const tr=document.getElementById('head'); tr.innerHTML='';
   COLS.forEach(c=>{
     const th=document.createElement('th');
+    if(c.tip) th.title = c.tip;
     const active = c.key===sortKey;
     th.innerHTML = c.label + (active ? '<span class="arrow">'+(sortDir<0?'▼':'▲')+'</span>' : '');
     if(c.sort!==false){
