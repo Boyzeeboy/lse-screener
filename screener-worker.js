@@ -52,8 +52,10 @@ export default {
   async scheduled(event, env, ctx){ await refreshAll(env); },
 
   async fetch(request, env, ctx){
+    const origin = request.headers.get('Origin') || '';
+    const allowedOrigin = origin === 'https://lse-screener.pages.dev' ? origin : '*';
     const cors = {
-      'Access-Control-Allow-Origin': 'https://lse-screener.pages.dev',
+      'Access-Control-Allow-Origin': allowedOrigin,
       'Content-Type': 'application/json',
       'Cache-Control': 'public, max-age=900',
     };
@@ -61,6 +63,18 @@ export default {
     if (path === '/refresh'){
       const r = await refreshAll(env);
       return new Response(JSON.stringify({ ok:true, ...r }), { headers:cors });
+    }
+    const stockMatch = path.match(/^\/stock\/([A-Za-z0-9]+)$/);
+    if (stockMatch){
+      const tkr = stockMatch[1].toUpperCase();
+      const cached = await env.SCREENER.get(SNAPSHOT_KEY);
+      if (!cached) return new Response(JSON.stringify({ error:'No snapshot yet.' }),
+        { status:503, headers:cors });
+      const snap = JSON.parse(cached);
+      const stock = (snap.stocks || []).find(s => s.tkr === tkr);
+      if (!stock) return new Response(JSON.stringify({ error:`Ticker ${tkr} not in watchlist.` }),
+        { status:404, headers:cors });
+      return new Response(JSON.stringify({ updated: snap.updated, ...stock }), { headers:cors });
     }
     const cached = await env.SCREENER.get(SNAPSHOT_KEY);
     if (!cached) return new Response(JSON.stringify({ error:'No snapshot yet. Hit /refresh.' }),

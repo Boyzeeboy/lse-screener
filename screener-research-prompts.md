@@ -5,12 +5,13 @@ the dashboard's metric definitions exactly. Paste the **House Definitions** bloc
 once at the start of a research session so Claude computes things the same way
 the Worker does — then use the prompts below.
 
-> **Symbols:** Yahoo Finance uses the `.L` suffix for London listings
-> (e.g. `TSCO.L`, `AZN.L`), *not* `.LON`.
+> **Data source:** Prompts 2–5 and 12 pull pre-computed metrics from your
+> Cloudflare Worker (`/stock/{TICKER}`), so the numbers match the dashboard
+> exactly. Prompts 6–11 supplement with Yahoo Finance web search for context
+> the Worker doesn't store (news, cash flow, RSI, etc.).
 >
-> **Data source:** The Worker pulls from Yahoo's unofficial `query1`/`query2`
-> endpoints (v8 chart for prices, v10 quoteSummary for fundamentals). These are
-> the same endpoints Yahoo's own site uses — reliable but unsupported.
+> **Symbols:** use the short ticker without `.L` for the Worker endpoint
+> (e.g. `HSBA`, `TSCO`). Prompts that search Yahoo Finance use `{TICKER}.L`.
 >
 > **Honesty:** these are research and sanity-check prompts, not buy signals.
 > LSE prices come in pence (GBp) — ask Claude to flag missing data and state
@@ -21,73 +22,77 @@ the Worker does — then use the prompts below.
 ## House Definitions (paste once per session)
 
 ```
-When I ask about a share, use these exact definitions so your answers match my
-LSE screener dashboard. Look up data on Yahoo Finance (finance.yahoo.com) using
-the .L suffix for London listings.
+You have access to my LSE screener Worker API. When I name a ticker, fetch its
+data from:
 
-- 12-month return = TOTAL return from adjusted close (dividends included),
+  https://lse-screener.wgrossiter.workers.dev/stock/{TICKER}
+
+That returns JSON with the exact metrics my dashboard uses:
+  price, r12 (12-month total return %), r3 (3-month total return %),
+  vol (annualised volatility %), pe, yield (%), roe (%), de (debt-to-equity
+  ratio), econ (earnings consistency 0–1).
+
+Metric definitions:
+- 12-month return = total return from adjusted close (dividends included),
   anchored to the trading day nearest 365 calendar days before the latest close.
 - 3-month return  = same method, 91 calendar days.
-- Volatility = annualised: sample standard deviation of daily LOG returns over
-  the trailing 252 trading days, multiplied by sqrt(252), expressed as a %.
-- P/E = trailing P/E from Yahoo's summary data.
-- Dividend yield and ROE come from Yahoo's quoteSummary (dividendYield and
-  returnOnEquity are decimals — multiply by 100 for %).
-- Debt-to-equity = Yahoo's financialData.debtToEquity (pre-computed as a
-  percentage, e.g. 43.32 = 43.32%) — divide by 100 to get the ratio shown on
-  the dashboard.
+- Volatility = annualised: sample standard deviation of daily log returns over
+  the trailing 252 trading days, × sqrt(252), expressed as %.
+- P/E = trailing P/E.
+- Yield and ROE are already percentages in the API response.
+- D/E = debt-to-equity ratio (lower is better; null if equity is negative).
+- Earnings consistency (econ) = 0–1 score; reliably positive net income with
+  smooth year-on-year change over ~5 years.
 - Four factors: Momentum (12m + 3m return), Value (low P/E + high yield),
-  Quality (ROE + low debt-to-equity + earnings consistency), Stability (low
-  volatility).
-- Quality detail: gearing = debt-to-equity (lower is better; skip it if
-  shareholder equity is negative rather than scoring it as low-geared).
-  Earnings consistency = reliably positive net income with smooth year-on-year
-  change over ~5 years (loss years and erratic swings score worse).
+  Quality (ROE + low D/E + earnings consistency), Stability (low volatility).
 
-Always state the currency/units, and say "no data" rather than estimating when a
+For deeper context (news, cash flow, RSI, drawdowns), search Yahoo Finance
+using the .L suffix (e.g. HSBA.L).
+
+Always state currency/units, and say "no data" rather than estimating when a
 figure is missing. Nothing you say is financial advice.
 ```
 
 ---
 
-## 1. Confirm the LSE symbol
+## 1. Confirm a ticker is in the watchlist
 
 ```
-Look up {COMPANY} on Yahoo Finance and confirm the exact .L symbol for the
-London Stock Exchange listing. Show the symbol, exchange and currency.
+Fetch https://lse-screener.wgrossiter.workers.dev/stock/{TICKER} and show me
+what comes back. If it returns a 404, the ticker isn't in my watchlist.
 ```
 
 ## 2. Single-stock snapshot (mirrors one dashboard row)
 
 ```
-For {TICKER}.L, give me a one-row snapshot matching my dashboard columns:
-price, 12-month total return, 3-month return, P/E, dividend yield, ROE,
-debt-to-equity, earnings consistency (5yr), and annualised volatility.
-Use my House Definitions. Note anything that's missing.
+For {TICKER}, fetch the data from my screener API and lay out a one-row
+snapshot matching my dashboard columns: price, 12-month total return, 3-month
+return, P/E, dividend yield, ROE, debt-to-equity, earnings consistency, and
+annualised volatility. Note anything that's null.
 ```
 
 ## 3. Head-to-head comparison
 
 ```
-Compare {TICKER_A}.L and {TICKER_B}.L across all four of my factors
-(Momentum, Value, Quality, Stability) using the House Definitions. Lay it out
-as a table, and tell me which one leads on each factor and why.
+Fetch {TICKER_A} and {TICKER_B} from my screener API. Compare them across all
+four of my factors (Momentum, Value, Quality, Stability). Lay it out as a
+table, and tell me which one leads on each factor and why.
 ```
 
 ## 4. Validate the Worker's maths
 
 ```
-Independently compute {TICKER}.L's 12-month total return and annualised
-volatility from Yahoo Finance's historical prices (adjusted close), showing the
-two anchor prices and the dates you used. My Worker reported r12 = {X}% and
-vol = {Y}% — do they match? If not, where's the discrepancy likely coming from?
+Fetch {TICKER} from my screener API — it reports r12 = {X}% and vol = {Y}%.
+Now independently look up {TICKER}.L on Yahoo Finance and try to verify those
+figures from the historical adjusted close data. Do they match? If not, where's
+the discrepancy likely coming from?
 ```
 
 ## 5. Explain a ranking
 
 ```
-{TICKER}.L scored high on Value but low on Stability in my screener. Pull the
-underlying figures from Yahoo Finance and explain in plain terms what's driving
+Fetch {TICKER} from my screener API. It scored high on Value but low on
+Stability. Using the returned metrics, explain in plain terms what's driving
 each — i.e. why it looks cheap, and why it's volatile.
 ```
 
@@ -98,44 +103,46 @@ each — i.e. why it looks cheap, and why it's volatile.
 ## 6. Value-trap check
 
 ```
-{TICKER}.L has a low P/E in my screener. Pull the earnings trend and recent
-news from Yahoo Finance. Is this cheap-for-a-reason — declining earnings,
-bad news — or genuinely under-priced? Lay out the evidence both ways.
+Fetch {TICKER} from my screener API — it has a low P/E. Now search for
+{TICKER}.L earnings trend and recent news on Yahoo Finance. Is this
+cheap-for-a-reason — declining earnings, bad news — or genuinely under-priced?
+Lay out the evidence both ways.
 ```
 
 ## 7. Dividend-safety check
 
 ```
-{TICKER}.L shows a high yield. Assess whether the dividend looks sustainable:
-pull earnings history and cash flow data from Yahoo Finance, estimate dividend
-cover, and flag if the yield is high because the price has fallen. Evidence
-only — not a recommendation.
+Fetch {TICKER} from my screener API — it shows a high yield. Now search Yahoo
+Finance for {TICKER}.L earnings and cash flow. Assess whether the dividend
+looks sustainable: estimate dividend cover, and flag if the yield is high
+because the price has fallen. Evidence only — not a recommendation.
 ```
 
 ## 8. Quality check (the full Buffett-style picture)
 
 ```
-Assess {TICKER}.L's durable quality on my three Quality sub-metrics. Pull from
-Yahoo Finance: ROE (financialData), debt-to-equity (flag if equity is negative),
-and income statement history (5 years of net income — are they reliably positive
-and smooth, or is there a loss year / big swings?). Conclude whether this looks
-like a durable, well-run business or a one-good-year flatter.
+Fetch {TICKER} from my screener API for ROE, D/E and earnings consistency.
+Then search Yahoo Finance for {TICKER}.L's income statement and balance sheet
+history. Assess durable quality: is ROE sustainably high, is gearing
+comfortable, and are earnings reliably positive and smooth — or is this a
+one-good-year flatter?
 ```
 
 ## 9. Momentum-reversal check
 
 ```
-{TICKER}.L ranks high on Momentum. Pull RSI (14-day) and the 50- and 200-day
-SMA from Yahoo Finance. Is it overbought or extended, and is the trend intact
-or rolling over?
+Fetch {TICKER} from my screener API — it ranks high on Momentum. Now search
+Yahoo Finance for {TICKER}.L's RSI (14-day) and the 50- and 200-day SMA. Is it
+overbought or extended, and is the trend intact or rolling over?
 ```
 
 ## 10. Stability / drawdown context
 
 ```
-For {TICKER}.L, beyond annualised volatility, show its largest peak-to-trough
-drawdown over the past 2 years and how it moved in the worst month. Use Yahoo
-Finance's historical adjusted close data.
+Fetch {TICKER} from my screener API for its annualised volatility. Then search
+Yahoo Finance for {TICKER}.L's price history. Beyond volatility, show its
+largest peak-to-trough drawdown over the past 2 years and how it moved in the
+worst month.
 ```
 
 ---
@@ -143,26 +150,30 @@ Finance's historical adjusted close data.
 ## 11. What's moving it right now
 
 ```
-Summarise the last 2 weeks of news for {TICKER}.L from Yahoo Finance and tie it
-to the price move over the same window. Keep it to the few items that actually
+Search for recent news on {TICKER}.L and summarise the last 2 weeks. Tie it to
+the price move over the same window. Keep it to the few items that actually
 moved the stock.
 ```
 
-## 12. Whole-watchlist context
+## 12. Whole-watchlist overview
 
 ```
-For these LSE tickers — {LIST} — pull summary data from Yahoo Finance and rank
-them by dividend yield and by P/E. Keep it to summary-level data only.
+Fetch the full snapshot from https://lse-screener.wgrossiter.workers.dev/ and
+rank the watchlist by dividend yield and by P/E. Show both rankings as tables.
 ```
 
 ---
 
 ### Notes
 
-- **Yahoo Finance is the source.** The Worker and these prompts both pull from
-  Yahoo. Prices are in GBp (pence) for most LSE stocks.
-- **Keep the dashboard authoritative for ranking.** These prompts are for
-  drilling into *one* name or a *pair*; the screener stays the source of truth
-  for the ranked composite across the whole watchlist.
+- **The Worker API is the source of truth** for the metrics the dashboard
+  displays. Prompts 2–5 and 12 pull directly from it so the numbers always
+  match.
+- **Yahoo Finance supplements** for context the Worker doesn't store: news,
+  cash flow, RSI, drawdown history, etc. (prompts 6–11).
+- **Watchlist only.** The `/stock/{TICKER}` endpoint covers the 20 tickers in
+  the Worker's `WATCHLIST`. For stocks outside it, search Yahoo Finance directly.
+- **Data freshness.** The Worker's cron runs at 18:30 UTC on weekdays. The
+  snapshot reflects end-of-day data from the most recent run.
 - **Not financial advice.** Every prompt here surfaces data and context to help
   you think — none of it tells you what to hold.
