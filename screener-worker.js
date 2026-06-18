@@ -42,6 +42,7 @@ const WATCHLIST = [
 const SNAPSHOT_KEY = 'snapshot:v1';
 const RET_12M_DAYS = 365;   // calendar days
 const RET_3M_DAYS  = 91;
+const MOM_LAG_DAYS = 30;    // skip the most recent month (short-term reversal)
 const VOL_WINDOW   = 252;   // trading days (~1yr) of daily returns
 const EPS_YEARS    = 5;     // years of EPS used for the consistency score
 const BATCH_SIZE   = 5;     // tickers per parallel batch (5 × 2 calls = 10 concurrent)
@@ -155,6 +156,7 @@ async function fetchOne(ticker, auth){
     price: latest ? Math.round(latest.close) : null,
     r12:   totalReturn(series, RET_12M_DAYS),
     r3:    totalReturn(series, RET_3M_DAYS),
+    mom:   laggedReturn(series, RET_12M_DAYS, MOM_LAG_DAYS),
     vol:   annualisedVol(series, VOL_WINDOW),
     pe:    num(f.pe),
     yield: pctNum(f.divYieldDecimal),
@@ -256,6 +258,14 @@ function totalReturn(series, calDays){
   const past = closeOnOrBefore(series, isoMinusDays(latest.date, calDays));
   if (!past || !(past.adj > 0) || !(latest.adj > 0)) return null;
   return (latest.adj / past.adj - 1) * 100;
+}
+function laggedReturn(series, startDays, endDays){
+  if (series.length < 2) return null;
+  const latest = series[series.length - 1];
+  const end   = closeOnOrBefore(series, isoMinusDays(latest.date, endDays));
+  const start = closeOnOrBefore(series, isoMinusDays(latest.date, startDays));
+  if (!start || !end || !(start.adj > 0) || !(end.adj > 0)) return null;
+  return (end.adj / start.adj - 1) * 100;
 }
 function annualisedVol(series, window){
   const pts = series.slice(-(window + 1));

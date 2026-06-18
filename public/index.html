@@ -168,7 +168,7 @@
   </div>
 
   <footer>
-    <p><b>How the score works:</b> each share is percentile-ranked 0–100 against the others on every metric (P/E, volatility and D/E inverted, since lower is better). The four factor scores are then blended using your weights — Quality now combines ROE, gearing (D/E) and earnings consistency (<b>Cons</b>, 0–100: reliably profitable and smooth). Missing metrics (shown as &mdash;) are skipped, so a factor scores on whatever data it has. A score of 100 = best-in-list on your priorities — relative to this set only.</p>
+    <p><b>How the score works:</b> each share is percentile-ranked 0–100 against the others on every metric (P/E, volatility and D/E inverted, since lower is better). The four factor scores are then blended using your weights — Momentum uses a 12-1 month return (skipping the last month to avoid short-term reversal, per Jegadeesh &amp; Titman); Quality combines ROE, gearing (D/E) and earnings consistency (<b>Cons</b>, 0–100: reliably profitable and smooth). Missing metrics (shown as &mdash;) are skipped, so a factor scores on whatever data it has. A score of 100 = best-in-list on your priorities — relative to this set only.</p>
     <p><b>The Signal column is a research shortlist, not advice — and not a prediction of returns.</b> A name is flagged <span class="sig sig-cand">Candidate</span> only if it clears every gate: composite &ge; 70, earnings consistency &ge; 0.5, P/E &le; 22, and 3-month return &ge; 0 — and isn't tripping the dividend-trap guard (yield &gt; 7% while the 12-month return is negative). <span class="sig sig-watch">Watch</span> = top-ranked but failing a gate or carrying that caution. Hover a badge for the per-check breakdown. It only narrows where to look; it doesn't replace your own judgement on the business and valuation, and it's only as reliable as the data and thresholds behind it (which haven't been backtested). Edit the <code>SIGNAL</code> values in the script to tune.</p>
   </footer>
 
@@ -220,8 +220,8 @@ const MOCK = [
 
 // ── Factor definitions (dir: +1 higher-better, -1 lower-better) ──────────────
 const FACTORS = [
-  {key:'momentum',label:'Momentum',hint:'12-month + 3-month total return. Rewards recent winners.',
-    metrics:[['r12',1],['r3',1]]},
+  {key:'momentum',label:'Momentum',hint:'12-1 month return (skips the last month to avoid short-term reversal). Rewards recent winners.',
+    metrics:[['mom',1]]},
   {key:'value',label:'Value',hint:'Low P/E + high dividend yield. Rewards the cheap-looking.',
     metrics:[['pe',-1],['yield',1]]},
   {key:'quality',label:'Quality',hint:'ROE + low gearing + earnings consistency. Rewards durable, well-run businesses.',
@@ -230,7 +230,7 @@ const FACTORS = [
     metrics:[['vol',-1]]},
 ];
 
-const DEFAULT_W = {momentum:30, value:30, quality:25, stability:15};
+const DEFAULT_W = {momentum:25, value:25, quality:35, stability:15};
 const BUFFETT_W = {momentum:0,  value:35, quality:45, stability:20}; // quality-led, contrarian
 let weights = {...DEFAULT_W};
 let sortKey = 'score', sortDir = -1;
@@ -317,7 +317,7 @@ function pct(values, v, dir){
 
 function computeScores(){
   const cols={};
-  ['r12','r3','pe','yield','roe','vol','de','econ'].forEach(m=>cols[m]=STOCKS.map(s=>s[m]));
+  ['r12','r3','mom','pe','yield','roe','vol','de','econ'].forEach(m=>cols[m]=STOCKS.map(s=>s[m]));
   const wsum = Object.values(weights).reduce((a,b)=>a+b,0) || 1;
 
   STOCKS.forEach(s=>{
