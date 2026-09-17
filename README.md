@@ -15,7 +15,7 @@ connector handles ad-hoc deep-dives inside Claude.
 | File | What it is | Hosted on |
 |------|------------|-----------|
 | `screener-worker.js` | Data engine — nightly fetch + cache, serves JSON | Cloudflare **Workers** |
-| `lse-screener.html` | The dashboard you actually look at | Cloudflare **Pages** |
+| `public/index.html` | The dashboard you actually look at | Cloudflare **Pages** |
 | `screener-research-prompts.md` | Prompt library for the MCP connector | Not hosted — Notion / local |
 
 **Data flow:** Worker (cron) → fetches from data provider → caches in KV →
@@ -64,16 +64,24 @@ kv_namespaces = [{ binding = "SCREENER", id = "PASTE_KV_ID_HERE" }]
 crons = ["30 18 * * 1-5"]   # 18:30 UTC, weekdays — after the LSE close
 ```
 
-**4. Deploy**
+**4. Add the manual-refresh secret**
+```bash
+npx wrangler secret put REFRESH_TOKEN
+```
+Use a long random value. Manual refresh requests must send this token as either
+`Authorization: Bearer <token>` or `X-Refresh-Token: <token>`.
+
+**5. Deploy**
 ```bash
 npx wrangler deploy
 ```
 You'll get a URL like `https://lse-screener.<you>.workers.dev`. Keep it.
 
-**5. Seed the first snapshot** — the cron hasn't run yet, so populate it once
-by hand by visiting:
-```
-https://lse-screener.<you>.workers.dev/refresh
+**6. Seed the first snapshot** — the cron hasn't run yet, so populate it once
+by hand:
+```bash
+curl -H "Authorization: Bearer $REFRESH_TOKEN" \
+  https://lse-screener.<you>.workers.dev/refresh
 ```
 Then visit the root URL — you should see JSON. After this, the cron keeps it
 fresh automatically.
@@ -86,7 +94,7 @@ fresh automatically.
 
 ## Part B — Deploy the Dashboard (Pages)
 
-**1. Point it at your Worker.** In `lse-screener.html`, set:
+**1. Point it at your Worker.** In `public/index.html`, set:
 ```js
 const WORKER_URL = 'https://lse-screener.<you>.workers.dev';
 ```
@@ -103,9 +111,11 @@ const WORKER_URL = 'https://lse-screener.<you>.workers.dev';
 npx wrangler pages deploy .      # run from the folder with the HTML
 ```
 
-**3. Tighten CORS.** Once you know your Pages domain, open the Worker's `fetch`
-handler and change `'Access-Control-Allow-Origin': '*'` to your Pages URL, then
-`npx wrangler deploy` again.
+**3. Set the allowed dashboard origin.** Once you know your Pages domain, set it
+on the Worker:
+```bash
+npx wrangler vars set ALLOWED_ORIGIN https://your-pages-domain.pages.dev
+```
 
 ---
 

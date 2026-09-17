@@ -1,206 +1,258 @@
-# LSE Share Screener — Build & Architecture Reference
+# LSE Share Screener - Architecture
 
-How the system is put together, where each piece runs, and how data flows through it.
+How the system is put together, where each piece runs, and what to touch when it changes.
 
-_Last updated: 16 June 2026_
+_Last updated: 23 August 2026_
 
-> See also: [`README.md`](README.md) (step-by-step deploy) and [`COWORK-HANDOFF.md`](COWORK-HANDOFF.md) (debugging context).
-
----
-
-## 1. What this is
-
-The LSE Share Screener is a personal, end-of-day stock screener for London-listed shares. It refreshes market data on its own overnight, then ranks a watchlist of shares by a weighted blend of four factors — Momentum, Value, Quality and Stability — on a dashboard you open in the morning.
-
-Nothing runs on your own machine in normal use. The data engine lives on Cloudflare's servers and refreshes itself on a schedule; the dashboard is a static page; and an optional Claude connector handles ad-hoc deep-dives. Your laptop can be switched off and the data still updates.
-
-**Not financial advice.** _A ranking reflects past data and is a research starting point, not a buy signal._
+> See also: [`README.md`](README.md) for deployment steps and [`COWORK-HANDOFF.md`](COWORK-HANDOFF.md) for debugging context.
 
 ---
 
-## 2. The moving parts
+## 1. What This Is
 
-The system is built from three deployable pieces plus two supporting stores. Each piece has one job.
+The LSE Share Screener is a personal end-of-day dashboard for London-listed shares. A Cloudflare Worker refreshes a watchlist from Yahoo Finance after the London close, stores one JSON snapshot in Cloudflare KV, and a static Pages dashboard reads that snapshot and ranks the shares by weighted factors.
+
+The dashboard is a research starting point, not a trading system and not financial advice.
+
+---
+
+## 2. Moving Parts
 
 | Piece | What it does | Where it runs |
 |-------|--------------|---------------|
-| `screener-worker.js` | The data engine. Fetches prices and fundamentals, does the maths, caches a JSON snapshot, and serves it. | Cloudflare Workers |
-| `public/index.html` | The dashboard you actually look at. Reads the snapshot and ranks the watchlist. | Cloudflare Pages |
-| KV namespace (`SCREENER`) | Key-value store holding the snapshot, per-ticker price history, cached fundamentals, and the refresh cursor. | Cloudflare KV |
-| Alpha Vantage | The market-data provider the Worker calls for prices, overview, balance sheet and earnings. | External API |
-| MCP connector + prompts | Optional Claude connector for ad-hoc research. Not hosted — configured inside Claude. | Claude (your account) |
+| `screener-worker.js` | Fetches Yahoo data, computes metrics, writes and serves the snapshot | Cloudflare Workers |
+| `public/index.html` | Static dashboard; reads the Worker JSON and ranks the watchlist in-browser | Cloudflare Pages |
+| KV namespace `SCREENER` | Stores the latest JSON snapshot at `snapshot:v1` | Cloudflare KV |
+| Yahoo Finance | Unofficial market-data source for prices and fundamentals | External service |
+| `screener-research-prompts.md` | Optional prompt library for deeper research | Local / Notion / Claude |
 
-The key idea: the dashboard never calls the market-data API directly. The Worker is the only thing that talks to Alpha Vantage, and it writes its results into KV. The dashboard just reads what the Worker last cached. This keeps API usage predictable and means the page loads instantly regardless of how slow the data provider is.
-
----
-
-## 3. How data flows
-
-On a normal day the flow is one direction, end to end:
-
-```
-Cron tick (after LSE close)
-      │
-      ▼
-  Worker.refreshNext()  ──►  Alpha Vantage  (prices + fundamentals)
-      │
-      ▼
-  KV store  (snapshot:v1, series:*, fund:*, cursor:v1)
-      │
-      ▼
-  Worker.fetch()  (HTTP GET)  ◄──  Dashboard (public/index.html)
-      │
-      ▼
-        You
-```
-
-**Refresh path (overnight):** a scheduled cron wakes the Worker, which fetches one ticker from Alpha Vantage, runs the maths, and upserts the result into the KV snapshot.
-
-**Read path (morning):** you open the dashboard; it does a single HTTP GET to the Worker, which returns the cached snapshot JSON. No API calls happen on the read path.
+The dashboard never calls Yahoo directly. Yahoo access is isolated inside the Worker, so provider changes should mostly stay inside the `fetchSeries`, `fetchFundamentals`, `yahooJson`, and `yahooJsonAuth` functions.
 
 ---
 
-## 4. The data engine (Worker)
+## 3. Data Flow
 
-The Worker has two entry points, defined in the default export of `screener-worker.js`.
-
-### 4.1 Two entry points
-
-- `scheduled(event, env, ctx)` — runs on the cron. Each invocation calls `refreshNext()` to refresh exactly one ticker.
-- `fetch(request, env, ctx)` — handles HTTP. A GET to `/` returns the cached snapshot. A GET to `/refresh` manually steps the refresh by one ticker and returns the result inline.
-
-### 4.2 Incremental, one-ticker-at-a-time refresh
-
-Rather than refreshing the whole watchlist in one go, the Worker refreshes a single ticker per invocation. This is the central design decision and it exists for two reasons:
-
-- A single Worker invocation cannot make all the API calls for the whole list within Cloudflare's execution time limit.
-- The free Alpha Vantage tier caps usage at 5 calls per minute and 25 calls per day. One ticker is up to 4 calls (~40 seconds with throttling), which stays safely inside the per-minute cap.
-
-A round-robin cursor (`cursor:v1` in KV) tracks which ticker is next. After each refresh the cursor advances, wrapping around at the end of the list. If a ticker fails, its previous data is kept and the cursor still advances — so one bad symbol can never wedge the rotation.
-
-### 4.3 Per-call throttle
-
-Every provider call routes through `avFetch()`, which spaces calls at least `MIN_CALL_GAP_MS` (13 seconds) apart. This keeps any burst under the 5-calls-per-minute cap. The balance-sheet and earnings calls are made sequentially (not in parallel) so they each pass through the throttle individually.
-
-### 4.4 What gets computed per ticker
-
-| Field | Meaning | Source |
-|-------|---------|--------|
-| `r12` / `r3` | 12-month and 3-month total return | Derived from the price series |
-| `vol` | Annualised volatility (~1yr of daily returns) | Derived from the price series |
-| `pe` / `yield` / `roe` | P/E ratio, dividend yield, return on equity | `OVERVIEW` call |
-| `de` | Debt-to-equity (gearing); lower is better | `BALANCE_SHEET` (cached monthly) |
-| `econ` | Earnings consistency score, 0–1 | `EARNINGS` (cached monthly) |
-
-The maths (`totalReturn`, `annualisedVol`, `debtToEquity`, `earningsConsistency`) is pure and unit-tested against known inputs, and returns `null` on bad or insufficient data rather than `NaN`. Treat it as settled — don't tweak it casually.
-
----
-
-## 5. What lives in KV (and for how long)
-
-All persistent state sits in one KV namespace, bound in the Worker as `SCREENER`. There are four kinds of key:
-
-| Key | Holds | Refresh cadence |
-|-----|-------|-----------------|
-| `snapshot:v1` | The full served JSON: every ticker's computed fields, plus `updated` timestamp and count. | Upserted one ticker at a time |
-| `series:<TICKER>` | Price history per ticker (~2 years retained), merged by date. | Topped up each refresh (compact) |
-| `fund:<TICKER>` | Cached debt-to-equity and earnings consistency. | Refetched at most every 30 days (`FUND_TTL_DAYS`) |
-| `cursor:v1` | Index of the next ticker to refresh (round-robin). | Advances every invocation |
-
-The two-tier caching is deliberate. Prices change daily, so the series is topped up every refresh with a small "compact" pull and merged into the stored history. Balance-sheet and earnings only change at reporting time, so they are cached for 30 days. This is what keeps the daily call budget low: most days cost about 2 calls per ticker, rising to about 4 once a month when the fundamentals refresh.
-
----
-
-## 6. Configuration & setup
-
-The build is configured in two places: `wrangler.toml` (deployment) and a handful of constants at the top of the Worker.
-
-### 6.1 wrangler.toml
-
-```toml
-name = "lse-screener"
-main = "screener-worker.js"
-compatibility_date = "2025-01-01"
-
-kv_namespaces = [{ binding = "SCREENER", id = "<your-kv-id>" }]
-
-[triggers]
-crons = [
-  "30 18 * * 1-5",  # 18:30 UTC weekdays, after LSE close
-  "32 18 * * 1-5",  # five staggered ticks, 2 min apart,
-  "34 18 * * 1-5",  # walk the 5-ticker watchlist in one
-  "36 18 * * 1-5",  # daily pass (one tick per ticker)
-  "38 18 * * 1-5",
-]
+```text
+Cron tick or authorized /refresh
+      |
+      v
+  refreshAll(env)
+      |
+      +--> getYahooCrumb()
+      |
+      +--> batches of fetchOne(ticker)
+              |
+              +--> fetchSeries(ticker)
+              +--> fetchFundamentals(ticker, auth)
+              +--> compute returns, momentum, volatility, value and quality fields
+      |
+      v
+  KV: snapshot:v1
+      |
+      v
+  Worker HTTP GET /
+      |
+      v
+  public/index.html dashboard
 ```
 
-The staggered crons are how the one-ticker-per-tick design covers the whole list. There is one tick per ticker. **If the watchlist grows, add one more cron tick per added ticker.**
+Normal use has two paths:
 
-### 6.2 Key constants in the Worker
+- Refresh path: the scheduled Worker cron calls `refreshAll(env)` and rebuilds the whole watchlist snapshot.
+- Read path: the dashboard performs one GET to the Worker root URL and receives the cached snapshot JSON.
 
-| Constant | What it controls |
-|----------|------------------|
-| `WATCHLIST` | The tickers to track. LSE symbols use the `.LON` suffix Alpha Vantage expects (e.g. `TSCO.LON`), not `.L`. |
-| `USE_FREE_TIER` | `true` uses the free raw-close endpoint (price return only). Set `false` with a premium key to restore adjusted total return. |
-| `MIN_CALL_GAP_MS` | Minimum gap between provider calls (13s) — the per-minute throttle. |
-| `FUND_TTL_DAYS` | How long balance-sheet/earnings stay cached (30 days). |
-| `SERIES_KEEP` / `VOL_WINDOW` | How much price history to retain (~2yr) and the volatility window (252 trading days). |
+Manual refresh is available at `/refresh`, but it is protected by `REFRESH_TOKEN`.
 
-### 6.3 The API key
+---
 
-The market-data key is stored as a Wrangler secret named `DATA_API_KEY`, never committed to the repo. Set or rotate it with:
+## 4. Worker Design
+
+The Worker exposes two entry points:
+
+| Entry point | Behavior |
+|-------------|----------|
+| `scheduled(event, env, ctx)` | Runs from Cloudflare cron and refreshes the full watchlist |
+| `fetch(request, env, ctx)` | Serves cached JSON, individual stock JSON, or protected manual refresh |
+
+HTTP routes:
+
+| Route | Response |
+|-------|----------|
+| `/` | Latest `snapshot:v1` JSON from KV |
+| `/stock/:ticker` | One stock row from the latest snapshot, plus `updated` |
+| `/refresh` | Rebuilds the full snapshot if authorized |
+
+`/refresh` accepts either:
+
+```text
+Authorization: Bearer <REFRESH_TOKEN>
+X-Refresh-Token: <REFRESH_TOKEN>
+```
+
+If `REFRESH_TOKEN` is missing from the Worker environment, manual refresh is denied. Scheduled cron refresh does not need the token.
+
+---
+
+## 5. Yahoo Provider
+
+The Worker uses Yahoo Finance's unofficial endpoints:
+
+| Function | Endpoint | Used for |
+|----------|----------|----------|
+| `fetchSeries` | `query1.finance.yahoo.com/v8/finance/chart/:ticker` | 2 years of daily prices, adjusted close, dividends and splits |
+| `fetchFundamentals` | `query2.finance.yahoo.com/v10/finance/quoteSummary/:ticker` | P/E, dividend yield, ROE, debt-to-equity and income history |
+| `getYahooCrumb` | `fc.yahoo.com` plus `query2.finance.yahoo.com/v1/test/getcrumb` | Session cookie and crumb for `quoteSummary` |
+
+Yahoo uses `.L` suffixes for London listings, for example `TSCO.L`. The dashboard strips that suffix in the served ticker field, so the UI shows `TSCO`.
+
+The provider is unofficial and can break without notice. If that happens, keep the scoring and snapshot contract stable and replace only the provider-specific fetch layer.
+
+---
+
+## 6. Refresh Model
+
+`refreshAll(env)` refreshes the complete `WATCHLIST` in one invocation:
+
+1. Fetches a Yahoo crumb and cookie.
+2. Reads the prior `snapshot:v1` from KV.
+3. Processes tickers in batches of `BATCH_SIZE`.
+4. Calls `fetchOne(ticker, auth)` for each ticker.
+5. Keeps a prior row for any ticker that fails during refresh.
+6. Writes a new snapshot to KV.
+
+Current constants:
+
+| Constant | Meaning |
+|----------|---------|
+| `WATCHLIST` | Yahoo tickers to refresh, using `.L` suffixes |
+| `SNAPSHOT_KEY` | KV key for the served snapshot, currently `snapshot:v1` |
+| `BATCH_SIZE` | Number of tickers fetched concurrently per batch |
+| `RET_12M_DAYS` | Calendar days for 12-month return |
+| `RET_3M_DAYS` | Calendar days for 3-month return |
+| `MOM_LAG_DAYS` | Days skipped for 12-1 momentum |
+| `VOL_WINDOW` | Trading-day window for annualised volatility |
+| `EPS_YEARS` | Number of annual reports used for earnings consistency |
+
+This version does not keep separate per-ticker price or fundamentals caches. The only persistent data is the latest snapshot.
+
+---
+
+## 7. Snapshot Contract
+
+The Worker writes:
+
+```json
+{
+  "updated": "2026-08-23T18:30:00.000Z",
+  "count": 20,
+  "stocks": [
+    {
+      "tkr": "TSCO",
+      "price": 368,
+      "r12": 13.8,
+      "r3": 2.4,
+      "mom": 9.5,
+      "vol": 16.2,
+      "pe": 13.2,
+      "yield": 3.5,
+      "roe": 13.9,
+      "de": 0.8,
+      "econ": 0.74
+    }
+  ]
+}
+```
+
+Field meanings:
+
+| Field | Meaning | Computed where |
+|-------|---------|----------------|
+| `price` | Latest close, rounded to pence | Worker |
+| `r12` | 12-month adjusted total return, percent | Worker |
+| `r3` | 3-month adjusted total return, percent | Worker |
+| `mom` | 12-1 month adjusted return, percent | Worker |
+| `vol` | Annualised volatility, percent | Worker |
+| `pe` | Trailing P/E | Yahoo summary detail / key statistics |
+| `yield` | Dividend yield, percent | Yahoo summary detail |
+| `roe` | Return on equity, percent | Yahoo financial data |
+| `de` | Debt-to-equity ratio | Yahoo financial data |
+| `econ` | Earnings consistency score from 0 to 1 | Worker |
+
+The dashboard enriches rows with company names and index tiers from its local `META` map, then computes percentile ranks, factor scores, composite score and signal labels in-browser.
+
+---
+
+## 8. Security And CORS
+
+The Worker intentionally separates public reads from private refresh:
+
+- Public: `GET /` and `GET /stock/:ticker`.
+- Private: `GET /refresh`, protected by `REFRESH_TOKEN`.
+
+CORS is restricted by `ALLOWED_ORIGIN`. If unset, the Worker defaults to:
+
+```text
+https://lse-screener.pages.dev
+```
+
+Requests with no `Origin` header are allowed so command-line tools, cron internals and direct server-to-server calls still work. Browser requests from any other origin receive `403`.
+
+Set the values with Wrangler:
 
 ```bash
-npx wrangler secret put DATA_API_KEY
+npx wrangler secret put REFRESH_TOKEN
+npx wrangler vars set ALLOWED_ORIGIN https://your-pages-domain.pages.dev
 ```
 
 ---
 
-## 7. The deploy model — two targets
+## 9. Deployment Model
 
-This is the part that's easy to trip over: there are two independent targets, and they are not the same action.
+There are two deployment targets:
 
-| Action | What it does | Effect |
-|--------|--------------|--------|
-| `npx wrangler deploy` | Pushes the Worker code and the cron triggers to Cloudflare. | Makes it actually run / changes live behaviour |
-| `git push` | Pushes source to GitHub. | Versions the code; does not change the running Worker |
+| Command | What it deploys |
+|---------|-----------------|
+| `npx wrangler deploy` | Worker code, KV binding and cron schedule |
+| `npx wrangler pages deploy public` | Static dashboard |
 
-**Keep them in sync.** A `wrangler deploy` changes what's live but not what's in source control; a `git push` versions your code but does not redeploy. After a change you normally do both.
+The dashboard also has a hardcoded Worker URL:
 
-### 7.1 Deploying the dashboard
+```js
+const WORKER_URL = 'https://lse-screener.<you>.workers.dev';
+```
 
-The dashboard is a static page deployed to Cloudflare Pages, either by connecting the GitHub repo (build command: none; output directory: `public`) or from the CLI with `npx wrangler pages deploy public`. Set the `WORKER_URL` constant near the top of `index.html` to your Worker's URL; left empty it runs on demo data.
-
-### 7.2 CORS
-
-The Worker's responses set `Access-Control-Allow-Origin` to the dashboard's Pages origin. If you change the dashboard domain, update that header in the Worker's `fetch` handler and redeploy.
+If the Worker URL changes, update `public/index.html` and redeploy Pages. If the Pages domain changes, update `ALLOWED_ORIGIN` and redeploy or update the Worker environment.
 
 ---
 
-## 8. Operating it
+## 10. Operating Notes
 
-### 8.1 Daily rhythm
+Daily flow:
 
-1. **Overnight** — nothing to do. The cron refreshes the snapshot on Cloudflare's servers.
-2. **Morning (~2 min)** — open the dashboard, adjust the factor weights, read the ranking.
-3. **Drill down** — for any name worth a closer look, switch to Claude + the connector and run a research prompt.
+1. The cron runs at `18:30 UTC` on weekdays, after the LSE close.
+2. The Worker refreshes the full watchlist and writes `snapshot:v1`.
+3. The dashboard reads the cached snapshot when opened.
 
-### 8.2 Re-seeding by hand
+Manual seed or refresh:
 
-The cron fills the snapshot automatically, but you can force it. Hitting `/refresh` steps the refresh by one ticker (it pauses ~40s before responding — that's the throttle, not a hang). Call it once per ticker for a full pass. Watch progress with `npx wrangler tail` in another terminal.
+```bash
+curl -H "Authorization: Bearer $REFRESH_TOKEN" \
+  https://lse-screener.<you>.workers.dev/refresh
+```
 
-### 8.3 Common changes
+Common changes:
 
-- **Change the watchlist:** edit `WATCHLIST` in the Worker, add a matching cron tick, redeploy. Add company labels to the `META` map in the HTML.
-- **Adjust the schedule:** edit the `crons` line in `wrangler.toml` and redeploy.
-- **Switch data providers:** only the `fetch*` functions are provider-specific; the maths and caching are not. Swapping to EODHD or Twelve Data means rewriting those fetchers.
+- Add a ticker: update `WATCHLIST` in `screener-worker.js`, add metadata in `META` inside `public/index.html`, redeploy both if needed.
+- Change the Pages domain: update `ALLOWED_ORIGIN`.
+- Change refresh time: edit the cron in `wrangler.toml` and run `npx wrangler deploy`.
+- Switch providers: keep the snapshot fields stable and replace the provider fetch functions.
 
 ---
 
-## 9. Cost & gotchas
+## 11. Known Tradeoffs
 
-- **Cost:** Pages, Workers and KV all sit inside Cloudflare's free tier at this scale. The only real cost is the market-data plan.
-- **Free-tier data limits:** Alpha Vantage's free tier (25 calls/day, 5/min, adjusted history gated) won't cover ~20 tickers. The watchlist is trimmed to 5 to stay inside it; a full list needs a paid AV key or another provider.
-- **Symbol suffix:** London listings need the `.LON` suffix, not `.L`. An empty `/refresh` result is usually a symbol problem.
-- **Quota resets:** the daily 25-call cap resets at 04:00 UTC (05:00 UK). If everything is failing with rate-limit notes, you've likely exhausted the day's calls through testing.
-- **12-month return on the free tier:** the free endpoint only gives ~100 days of history, so the 12-month figure fills in only after the daily cache has accrued a year of prices.
+- Yahoo Finance is unofficial and may change its crumb, cookie or response behavior.
+- Fundamentals are fetched on every refresh rather than cached separately.
+- A failed ticker keeps its prior row only if a previous snapshot exists.
+- The dashboard score is relative to the current watchlist, not an absolute market score.
+- Signal labels are transparent gates for research triage, not backtested investment advice.
