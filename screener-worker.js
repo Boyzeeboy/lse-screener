@@ -53,36 +53,67 @@ export default {
   async scheduled(event, env, ctx){ await refreshAll(env); },
 
   async fetch(request, env, ctx){
-    const origin = request.headers.get('Origin') || '';
-    const allowedOrigin = origin === 'https://lse-screener.pages.dev' ? origin : '*';
-    const cors = {
-      'Access-Control-Allow-Origin': allowedOrigin,
-      'Content-Type': 'application/json',
-      'Cache-Control': 'public, max-age=900',
-    };
+    const cors = corsHeaders(request, env);
+    if (!cors) {
+      return json({ error:'Origin not allowed.' }, 403);
+    }
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status:204, headers: cors });
+    }
     const path = new URL(request.url).pathname;
     if (path === '/refresh'){
+      const refreshHeaders = { ...cors, 'Cache-Control': 'no-store' };
+      if (!isRefreshAuthorized(request, env)) {
+        return json({ error:'Refresh token required.' }, 401, refreshHeaders);
+      }
       const r = await refreshAll(env);
-      return new Response(JSON.stringify({ ok:true, ...r }), { headers:cors });
+      return json({ ok:true, ...r }, 200, refreshHeaders);
     }
     const stockMatch = path.match(/^\/stock\/([A-Za-z0-9]+)$/);
     if (stockMatch){
       const tkr = stockMatch[1].toUpperCase();
       const cached = await env.SCREENER.get(SNAPSHOT_KEY);
-      if (!cached) return new Response(JSON.stringify({ error:'No snapshot yet.' }),
-        { status:503, headers:cors });
+      if (!cached) return json({ error:'No snapshot yet.' }, 503, cors);
       const snap = JSON.parse(cached);
       const stock = (snap.stocks || []).find(s => s.tkr === tkr);
-      if (!stock) return new Response(JSON.stringify({ error:`Ticker ${tkr} not in watchlist.` }),
-        { status:404, headers:cors });
-      return new Response(JSON.stringify({ updated: snap.updated, ...stock }), { headers:cors });
+      if (!stock) return json({ error:`Ticker ${tkr} not in watchlist.` }, 404, cors);
+      return json({ updated: snap.updated, ...stock }, 200, cors);
     }
     const cached = await env.SCREENER.get(SNAPSHOT_KEY);
-    if (!cached) return new Response(JSON.stringify({ error:'No snapshot yet. Hit /refresh.' }),
-      { status:503, headers:cors });
+    if (!cached) return json({ error:'No snapshot yet. Hit /refresh.' }, 503, cors);
     return new Response(cached, { headers:cors });
   },
 };
+
+function corsHeaders(request, env){
+  const origin = request.headers.get('Origin');
+  const allowedOrigin = env.ALLOWED_ORIGIN || 'https://lse-screener.pages.dev';
+  const headers = {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'public, max-age=900',
+    'Vary': 'Origin',
+  };
+  if (!origin) return headers;
+  if (origin !== allowedOrigin) return null;
+  return {
+    ...headers,
+    'Access-Control-Allow-Origin': allowedOrigin,
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Authorization, X-Refresh-Token, Content-Type',
+  };
+}
+
+function json(body, status = 200, headers = {}){
+  return new Response(JSON.stringify(body), { status, headers });
+}
+
+function isRefreshAuthorized(request, env){
+  if (!env.REFRESH_TOKEN) return false;
+  const auth = request.headers.get('Authorization') || '';
+  const bearer = auth.match(/^Bearer\s+(.+)$/i);
+  const token = (bearer && bearer[1]) || request.headers.get('X-Refresh-Token');
+  return token === env.REFRESH_TOKEN;
+}
 
 // ── Yahoo crumb/cookie auth ─────────────────────────────────────────────────
 // Yahoo's v10 quoteSummary requires a crumb+cookie obtained per-session. The

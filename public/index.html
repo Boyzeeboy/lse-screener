@@ -297,7 +297,7 @@ function setNotice(kind, msg){
   const n = document.getElementById('notice');
   if(kind==='live'){
     n.className='notice';
-    n.innerHTML='<b>Live end-of-day data.</b> Pulled from your Worker. Gearing (D/E) and consistency come from fundamentals refreshed monthly; any metric without enough data shows as &mdash;. Not financial advice.';
+    n.innerHTML='<b>Live end-of-day data.</b> Pulled from your Worker. Gearing (D/E) and consistency come from Yahoo fundamentals on each refresh; any metric without enough data shows as &mdash;. Not financial advice.';
   }else if(kind==='error'){
     n.className='notice err';
     n.innerHTML='<b>Couldn\u2019t reach the data feed</b> ('+msg+'). Showing demo data. Check the Worker is deployed and <code>WORKER_URL</code> is correct, then retry.';
